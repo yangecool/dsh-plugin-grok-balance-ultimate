@@ -1,0 +1,6 @@
+{
+  "meta": {
+    "title": "Grok coding plan",
+    "description": "Signs in to Grok with OAuth, shows the remaining Coding Plan quota in a composer popover, and opens a dedicated usage statistics page."
+  }
+}

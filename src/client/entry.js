@@ -1,0 +1,133 @@
+/**
+ * Client entry of dsh-plugin-grok-balance-ultimate.
+ *
+ * Registers one locale namespace, one stylesheet, and five UI contributions:
+ *  - the sidebar icon of the dedicated usage page (`sidebar.panellist`),
+ *  - the dedicated usage page itself (`main` keyed by PANEL_ID),
+ *  - the Grok account row on the Models settings page
+ *    (`settings.models.footer`),
+ *  - the provisioning note inside each coding-plan provider card
+ *    (`settings.models.provider-card`, keyed by the pi-ai settings namespace),
+ *  - the composer remaining-quota trigger and popover
+ *    (`conversation.input.right`).
+ *
+ * The usage page is a sidebar destination only: the Settings nav keeps the
+ * Models integration row and no duplicate usage section.
+ */
+import { bindContext, bindReact } from './runtime.js';
+import { setTranslate, state } from './state.js';
+import { coreDicts } from './dicts-core.js';
+import { CORE_CSS } from './ui.js';
+import { GrokUsagePage, PanelIcon, pageCss, pageDicts } from './page.js';
+import { ComposerIndicator, indicatorCss, indicatorDicts } from './indicator.js';
+import {
+  ModelsAccountRow,
+  ProviderCredentialNote,
+  modelsRowCss,
+  modelsRowDicts,
+} from './models-row.js';
+
+const PACKAGE_ID = 'dsh-plugin-grok-balance-ultimate';
+const PANEL_ID = 'grok-usage';
+const LOCALE_NS = 'grok-balance';
+const STYLE_TAG_ID = `${PACKAGE_ID}-styles`;
+
+/** Merge the per-module dictionaries into the two shipped locales. */
+function mergeDicts() {
+  return {
+    zh: { ...coreDicts.zh, ...pageDicts.zh, ...indicatorDicts.zh, ...modelsRowDicts.zh },
+    en: { ...coreDicts.en, ...pageDicts.en, ...indicatorDicts.en, ...modelsRowDicts.en },
+  };
+}
+
+/**
+ * Insert the plugin stylesheet once.
+ * @returns disposer removing the style element.
+ */
+function insertStyles() {
+  const existing = document.getElementById(STYLE_TAG_ID);
+  if (existing !== null) {
+    existing.remove();
+  }
+  const tag = document.createElement('style');
+  tag.id = STYLE_TAG_ID;
+  tag.dataset.plugin = PACKAGE_ID;
+  tag.textContent = `${CORE_CSS}\n${pageCss}\n${indicatorCss}\n${modelsRowCss}`;
+  document.head.appendChild(tag);
+  return () => {
+    tag.remove();
+  };
+}
+
+/**
+ * Activate the Client half.
+ * @param ctx - Client Cordis context.
+ */
+function apply(ctx) {
+  bindContext(ctx);
+  const translate = ctx.locale.bind(LOCALE_NS);
+  setTranslate(translate);
+
+  ctx.effect(() => ctx.locale.register(LOCALE_NS, mergeDicts()), 'grok-balance: dictionaries');
+  ctx.effect(() => insertStyles(), 'grok-balance: stylesheet');
+  ctx.effect(() => {
+    void state.bootstrap().catch(() => {
+      /* bootstrap failures surface through the store error state */
+    });
+    return () => {
+      state.dispose();
+    };
+  }, 'grok-balance: store bootstrap');
+  ctx.effect(() => {
+    const timer = setInterval(() => {
+      state.tick();
+    }, 30_000);
+    return () => clearInterval(timer);
+  }, 'grok-balance: refresh ticker');
+
+  ctx.slots.inject('sidebar.panellist', () => ctx.slots.register({
+    name: 'sidebar.panellist',
+    id: PANEL_ID,
+    order: 20,
+    label: () => ctx.locale.bind(LOCALE_NS)('app.nav'),
+  }, PanelIcon));
+  ctx.slots.inject('main', () => ctx.slots.register({
+    name: 'main',
+    key: PANEL_ID,
+    locale: LOCALE_NS,
+  }, GrokUsagePage));
+  // Models settings integration: the OAuth account row plus the per-provider
+  // note that its API key is provisioned automatically. The keyed provider-card
+  // seat is dispatched with the pi-ai settings namespace for every pi-ai route.
+  ctx.slots.inject('settings.models.footer', () => ctx.slots.register({
+    name: 'settings.models.footer',
+    id: 'grok-account',
+    order: 10,
+    locale: LOCALE_NS,
+  }, ModelsAccountRow));
+  // The pi-ai settings namespace is the Loader entry id (`llm-pi-ai`): the
+  // directory entries carry it as `settingsNs`, and the Models page dispatches
+  // this keyed slot with `entryKey = settingsNs`.
+  ctx.slots.inject('settings.models.provider-card', () => ctx.slots.register({
+    name: 'settings.models.provider-card',
+    key: 'llm-pi-ai',
+    locale: LOCALE_NS,
+  }, ProviderCredentialNote));
+  ctx.slots.inject('conversation.input.right', () => ctx.slots.register({
+    name: 'conversation.input.right',
+    id: 'grok-balance',
+    order: 20,
+    locale: LOCALE_NS,
+  }, ComposerIndicator));
+}
+
+window.__ModuleLoader__.load({
+  id: PACKAGE_ID,
+  factory(require) {
+    bindReact(require('react'));
+    return {
+      inject: ['locale', 'slots'],
+      apply,
+    };
+  },
+});

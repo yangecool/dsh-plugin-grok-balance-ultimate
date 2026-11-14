@@ -1,0 +1,57 @@
+{
+  "name": "dsh-plugin-grok-balance-ultimate",
+  "version": "1.1.1",
+  "description": "Grok Coding Plan quota and usage for the DeepSeek Harness Web GUI: Grok OAuth login, a remaining-quota popover at the composer, and a dedicated usage statistics page.",
+  "type": "module",
+  "main": "lib/index.js",
+  "exports": {
+    ".": "./lib/index.js",
+    "./client": "./lib/client.js",
+    "./locale/*.json": "./locale/*.json",
+    "./icon": "./icon.svg",
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "lib/index.js",
+    "lib/host",
+    "lib/client.js",
+    "cordis.patch.yml",
+    "locale/*.json",
+    "icon.svg",
+    "README.md",
+    "CHANGELOG.md",
+    "LICENSE"
+  ],
+  "keywords": [
+    "dsh",
+    "dsh-plugin",
+    "deepseek-harness",
+    "grok",
+    "zhipu",
+    "glm",
+    "coding-plan",
+    "quota",
+    "usage",
+    "balance"
+  ],
+  "license": "MIT",
+  "scripts": {
+    "build:client": "node scripts/build-client.mjs",
+    "test": "node --test tests/host/*.test.mjs tests/client/*.test.mjs",
+    "check": "node --check lib/index.js && node --check lib/client.js"
+  },
+  "devDependencies": {
+    "esbuild": "0.28.2"
+  },
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "platform": "web",
+      "inject": [
+        "@deepseek-ai/dsh-client-ui-slots"
+      ]
+    }
+  }
+}
