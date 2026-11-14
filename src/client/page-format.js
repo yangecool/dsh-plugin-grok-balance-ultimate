@@ -7,18 +7,25 @@
  * instead of throwing during render.
  */
 import * as fmt from './format.js';
-import {
-  attempt,
-  clampPercent,
-  isNumber,
-  num,
-  toMs,
-  tr,
-  windowOf,
-} from './page-helpers.js';
+import { attempt, clampPercent, isNumber, num, toMs, tr } from './page-helpers.js';
 
 /** BCP 47 tags used by the Intl fallbacks. */
 const LOCALE_TAGS = { zh: 'zh-CN', en: 'en-US' };
+
+/** Known `currentPeriod.type` spellings mapped to dictionary keys. */
+const PERIOD_TYPE_KEYS = Object.freeze({
+  USAGE_PERIOD_TYPE_WEEKLY: 'page.periodWeekly',
+  USAGE_PERIOD_TYPE_MONTHLY: 'page.periodMonthly',
+});
+
+/** Known `subscriptionTier` spellings mapped to dictionary keys (case-insensitive). */
+const TIER_KEYS = Object.freeze({
+  supergrok_heavy: 'page.tierSupergrokHeavy',
+  supergrok_light: 'page.tierSupergrokLight',
+  supergrok: 'page.tierSupergrok',
+  heavy: 'page.tierHeavy',
+  light: 'page.tierLight',
+});
 
 /**
  * BCP 47 tag of a plugin locale id.
@@ -86,25 +93,22 @@ export function formatCompact(value, locale) {
 }
 
 /**
- * Format a credit amount.
- * @param value - number or null.
+ * Format a USD amount (`$12.35`).
+ * @param value - USD amount or null.
  * @param locale - plugin locale id.
  * @returns formatted text, else an em dash placeholder.
  */
-export function formatCredits(value, locale) {
+export function formatUsd(value, locale) {
   const numeric = num(value);
   if (numeric === null) {
     return '—';
   }
-  const result = shared('formatCredits', numeric, locale);
+  const result = shared('formatUsd', numeric, locale);
   if (typeof result === 'string' && result.length > 0) {
     return result;
   }
   return attempt(
-    () =>
-      new Intl.NumberFormat(localeTag(locale), {
-        maximumFractionDigits: 2,
-      }).format(numeric),
+    () => `$${new Intl.NumberFormat(localeTag(locale), { minimumFractionDigits: 2, maximumFractionDigits: 2 }).format(numeric)}`,
     '—',
   );
 }
@@ -121,7 +125,8 @@ export function formatDateTime(value, locale, options = {}) {
   if (ms === null) {
     return '—';
   }
-  const result = shared('formatDateTime', ms, locale);
+  const helper = options.dateOnly ? 'formatDate' : 'formatDateTime';
+  const result = shared(helper, ms, locale);
   if (typeof result === 'string' && result.length > 0 && !options.dateOnly) {
     return result;
   }
@@ -201,114 +206,51 @@ export function formatPercentValue(percent, locale) {
 }
 
 /**
- * Remaining percentage of a quota limit: shared helper first, local math after.
- * @param limit - quota limit entry.
- * @returns 0..100, else null.
+ * Elapsed share of one billing period, clamped to 0..100.
+ * @param period - billing `currentPeriod` block (`{ start, end }` epoch ms or null).
+ * @param now - current epoch milliseconds.
+ * @returns elapsed percentage 0..100, or null when the period bounds are unusable.
  */
-export function remainingPercentOf(limit) {
-  const result = shared('remainingPercent', limit);
-  if (isNumber(result) && Number.isFinite(result)) {
-    return clampPercent(result);
-  }
-  return attempt(() => {
-    if (!limit || typeof limit !== 'object') {
-      return null;
-    }
-    const pct = clampPercent(num(limit.percentage));
-    if (pct !== null) {
-      return clampPercent(100 - pct);
-    }
-    const remaining = num(limit.remaining);
-    const total = num(limit.number);
-    return remaining !== null && total !== null && total > 0
-      ? clampPercent((remaining / total) * 100)
-      : null;
-  }, null);
-}
-
-/**
- * Used amount of a quota limit.
- * @param limit - quota limit entry.
- * @returns used amount, else null.
- */
-export function usedOf(limit) {
-  const result = shared('limitUsed', limit);
-  if (isNumber(result)) {
-    return result;
-  }
-  return attempt(() => {
-    if (!limit || typeof limit !== 'object') return null;
-    if (isNumber(limit.currentValue)) return limit.currentValue;
-    const total = num(limit.number);
-    const remaining = num(limit.remaining);
-    return total !== null && remaining !== null ? Math.max(0, total - remaining) : null;
-  }, null);
-}
-
-/**
- * Total amount of a quota limit.
- * @param limit - quota limit entry.
- * @returns total amount, else null.
- */
-export function totalOf(limit) {
-  const result = shared('limitTotal', limit);
-  if (isNumber(result)) {
-    return result;
-  }
-  return limit && typeof limit === 'object' ? num(limit.number) : null;
-}
-
-/**
- * Remaining amount of a quota limit.
- * @param limit - quota limit entry.
- * @returns remaining amount, else null.
- */
-export function remainingOfLimit(limit) {
-  const result = shared('remainingOf', limit);
-  if (isNumber(result)) {
-    return result;
-  }
-  return attempt(() => {
-    if (!limit || typeof limit !== 'object') return null;
-    if (isNumber(limit.remaining)) return limit.remaining;
-    const total = num(limit.number);
-    const used = usedOf(limit);
-    return total !== null && used !== null ? Math.max(0, total - used) : null;
-  }, null);
-}
-
-/**
- * Window label of a quota limit.
- * @param limit - quota limit entry.
- * @param t - translator.
- * @returns localized window label.
- */
-export function labelOfLimit(limit, t) {
-  const windowName = windowOf(limit);
-  if (windowName === 'fiveHour') return tr(t, 'quota.fiveHour');
-  if (windowName === 'week') return tr(t, 'quota.week');
-  if (windowName === 'tool') return tr(t, 'quota.tool');
-  return tr(t, 'quota.other');
-}
-
-/**
- * Format a billing-cycle value for the plan card.
- * @param subscription - subscription payload.
- * @param t - translator.
- * @returns localized cycle text, else null.
- */
-export function billingCycleText(subscription, t) {
-  if (!subscription || typeof subscription !== 'object') {
+export function periodElapsedPercent(period, now) {
+  if (period === null || typeof period !== 'object' || !isNumber(now)) {
     return null;
   }
-  if (subscription.autoRenew === true) {
-    return tr(t, 'page.planAutoRenew');
+  const start = toMs(period.start);
+  const end = toMs(period.end);
+  if (start === null || end === null || end <= start) {
+    return null;
   }
-  if (subscription.autoRenew === false) {
-    return tr(t, 'page.planManualRenew');
+  const fraction = (now - start) / (end - start);
+  if (!Number.isFinite(fraction)) {
+    return null;
   }
-  if (typeof subscription.billingCycle === 'string' && subscription.billingCycle.trim().length > 0) {
-    return subscription.billingCycle.trim();
+  return clampPercent(fraction * 100);
+}
+
+/**
+ * Localized label of one billing period type.
+ * @param type - `currentPeriod.type` string or null.
+ * @param t - translator.
+ * @returns the localized label, or null when the type is unknown.
+ */
+export function periodTypeLabel(type, t) {
+  if (typeof type !== 'string' || type === '') {
+    return null;
   }
-  return null;
+  const key = PERIOD_TYPE_KEYS[type];
+  return key === undefined ? null : tr(t, key);
+}
+
+/**
+ * Localized tier label of a subscription tier value.
+ * @param tier - `subscriptionTier` string or null.
+ * @param t - translator.
+ * @returns the localized label for a known tier, else the raw value, else null.
+ */
+export function tierLabel(tier, t) {
+  if (typeof tier !== 'string' || tier.trim() === '') {
+    return null;
+  }
+  const key = TIER_KEYS[tier.trim().toLowerCase()];
+  return key === undefined ? tier : tr(t, key);
 }

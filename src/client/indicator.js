@@ -1,28 +1,32 @@
 /**
- * Composer remaining-quota trigger and floating popover.
+ * Composer credit trigger and floating popover.
  *
  * The trigger lives in `conversation.input.right`, right beside the model
- * selector: two thin meters (5-hour window and weekly window) with their
- * remaining percentages, a "Sign in" chip while logged out, or a quiet warning
- * dot when the quota cannot be read. Clicking it opens a fixed-position
- * popover rendered inline in the trigger wrapper (never appended to
- * `document.body`), anchored above the trigger from its bounding rect and
- * clamped to the viewport. Countdowns re-render every 30 seconds.
+ * selector: one ring showing the REMAINING subscription credit (the ring's arc
+ * is the remaining fraction of `creditUsagePercent`'s complement), a "Sign in"
+ * chip while logged out, or a quiet warning dot when the credit cannot be
+ * read. Clicking it opens a fixed-position popover rendered inline in the
+ * trigger wrapper (never appended to `document.body`), anchored above the
+ * trigger from its bounding rect and clamped to the viewport. Countdowns
+ * re-render every 30 seconds.
+ *
+ * The widget renders only for Grok-model sessions (provider gate via the
+ * per-session model directory) and, while signed out, only when the config's
+ * `showIndicatorWhenLoggedOut` allows it.
  *
  * Everything here is written defensively: this component occupies a composer
  * slot, and a render-time exception would blank the composer row. All copy goes
  * through `t` from {@link indicatorDicts}; all colors go through
- * `--dsw-alias-*` theme tokens.
+ * `--dsw-alias-*` theme tokens (never `--dsw-alias-brand-primary` as a data
+ * fill).
  */
 
 import { rt } from './runtime.js';
 import { state } from './state.js';
 import { useLocalized, useNow, useSnapshot } from './hooks.js';
-import {
-  countdown, formatCompact, formatDateTime, formatPercent, formatRelative, limitTotal, remainingOf,
-  remainingPercent, resolveWindow,
-} from './format.js';
+import { countdown, formatPercent, formatRelative, formatUsd } from './format.js';
 import { Bar, Button, EmptyState, Icon, IconButton, Notice, Spinner } from './ui.js';
+import { SUPERGROK_URL } from './page-links.js';
 
 /** Main panel key of the plugin's dedicated usage page (`main` slot). */
 const PANEL_ID = 'grok-usage';
@@ -42,12 +46,6 @@ const POPOVER_WIDTH = 352;
 /** Upper bound for the popover height (contract: `min(70vh, 520px)`). */
 const POPOVER_MAX_HEIGHT = 520;
 
-/** Family-specific public usage pages, used when config overrides nothing. */
-const FAMILY_USAGE_PAGES = Object.freeze({
-  grok: 'https://grok.cn/coding-plan/personal/usage',
-  zai: 'https://z.ai/manage-apikey/coding-plan/personal/usage',
-});
-
 /** @returns {import('react').ReactElement} element built through the bound runtime. */
 function h(...args) {
   return rt.h(...args);
@@ -61,11 +59,6 @@ function passthroughTranslate(key) {
 /** @returns {boolean} whether `value` is a non-array object. */
 function isRecord(value) {
   return value !== null && typeof value === 'object' && !Array.isArray(value);
-}
-
-/** @returns {unknown[]} a defensive array view of `value`. */
-function asArray(value) {
-  return Array.isArray(value) ? value : [];
 }
 
 /** @returns {number|null} `value` when it is a finite number. */
@@ -99,21 +92,16 @@ function toMs(value) {
 }
 
 /**
- * Compact a quantity for the narrow popover cells.
- * @returns {string|null} compact number text, or null when not a finite number.
+ * Remaining credit percentage from the billing block. The upstream
+ * `creditUsagePercent` is the USED share, so the remainder is its complement.
+ * @returns {number|null} remaining percent, or null when unknown.
  */
-function compactNumber(value, locale) {
-  if (finiteNumber(value) === null) return null;
-  const text = formatCompact(value, locale);
-  return typeof text === 'string' && text !== '' ? text : null;
-}
-
-/** @returns {string} remaining-percentage text (`72%`, `<1%`, or the dash placeholder). */
-function percentText(percent, locale, t) {
-  const value = clampPercent(percent);
-  if (value === null) return t('widget.value.dash');
-  if (value > 0 && value < 1) return t('widget.value.underOnePercent');
-  return formatPercent(value, locale, 0);
+function remainingPercentOf(overview) {
+  const billing = isRecord(overview) && isRecord(overview.billing) ? overview.billing : null;
+  if (billing === null || billing.error != null) return null;
+  const used = clampPercent(billing.creditUsagePercent);
+  if (used === null) return null;
+  return clampPercent(100 - used);
 }
 
 /** @returns {'brand'|'warn'|'error'|'idle'} shared `Bar` tone for a remaining percentage. */
@@ -133,130 +121,12 @@ function textToneClass(percent) {
   return '';
 }
 
-/**
- * Remaining percentage of one normalized quota limit; null when the limit is
- * absent so the widget can show its unknown state.
- * @returns {number|null} remaining percent, or null when the limit is unknown.
- */
-function remainingPercentOf(limit) {
-  if (!isRecord(limit)) return null;
-  const value = remainingPercent(limit);
-  return Number.isFinite(value) ? value : null;
-}
-
-/**
- * Group the overview's quota limits into the windows the widget renders.
- * Unclassified limits still surface as compact rows instead of disappearing.
- * @returns {{fiveHour: object|null, week: object|null, extras: object[]}} limits by window.
- */
-function limitsOf(overview) {
-  const quota = isRecord(overview) && isRecord(overview.quota) ? overview.quota : null;
-  const limits = quota === null ? [] : asArray(quota.limits);
-  const grouped = { fiveHour: null, week: null, extras: [] };
-  for (const limit of limits) {
-    if (!isRecord(limit)) continue;
-    const bucket = resolveWindow(limit);
-    if (bucket === 'fiveHour' && grouped.fiveHour === null) grouped.fiveHour = limit;
-    else if (bucket === 'week' && grouped.week === null) grouped.week = limit;
-    else grouped.extras.push({ limit, bucket });
-  }
-  return grouped;
-}
-
-/** @returns {string} localized label of a limit window. */
-function windowLabelOf(bucket, t) {
-  if (bucket === 'fiveHour') return t('widget.window.fiveHour');
-  if (bucket === 'week') return t('widget.window.week');
-  if (bucket === 'tool') return t('widget.window.tool');
-  return t('widget.window.other');
-}
-
-/**
- * Reset countdown of one limit, rendered against the ticking `now`.
- * @returns {string} localized reset copy.
- */
-function resetTextOf(limit, now, t) {
-  const resetAt = toMs(isRecord(limit) ? limit.nextResetTime : null);
-  if (resetAt === null) return t('widget.reset.unknown');
-  const remainingMs = resetAt - now;
-  if (remainingMs <= 0) return t('widget.reset.soon');
-  const relative = countdown(resetAt, t, now);
-  if (typeof relative !== 'string' || relative === '') return t('widget.reset.unknown');
-  return t('widget.reset.in', { time: relative });
-}
-
-/** @returns {string|null} the soonest reset countdown among the primary limits. */
-function nearestResetTextOf(limits, now, t) {
-  let soonest = null;
-  for (const limit of [limits.fiveHour, limits.week]) {
-    const resetAt = toMs(isRecord(limit) ? limit.nextResetTime : null);
-    if (resetAt !== null && (soonest === null || resetAt < soonest.at)) soonest = { at: resetAt, limit };
-  }
-  return soonest === null ? null : resetTextOf(soonest.limit, now, t);
-}
-
-/**
- * Plan title shown in the popover header.
- * @returns {string} plan level, product name, or the localized fallback.
- */
-function planNameOf(overview, t) {
-  const subscription = isRecord(overview) && isRecord(overview.subscription) ? overview.subscription : null;
-  const productName = subscription !== null && typeof subscription.productName === 'string'
-    ? subscription.productName.trim()
-    : '';
-  if (productName !== '') return productName;
-  const quota = isRecord(overview) && isRecord(overview.quota) ? overview.quota : null;
-  const level = quota === null || typeof quota.level !== 'string' ? '' : quota.level.trim();
-  if (level !== '') {
-    return t('widget.plan.level', { level: level.charAt(0).toUpperCase() + level.slice(1) });
-  }
-  return t('widget.plan.fallback');
-}
-
-/** @returns {string} family id, preferring the live overview. */
-function familyIdOf(snapshot, overview) {
-  const candidates = [
-    isRecord(overview) ? overview.family : null,
-    isRecord(snapshot) && isRecord(snapshot.auth) ? snapshot.auth.family : null,
-    isRecord(snapshot) && isRecord(snapshot.config) ? snapshot.config.family : null,
-  ];
-  for (const candidate of candidates) {
-    if (typeof candidate === 'string' && candidate !== '') return candidate;
-  }
-  return 'grok';
-}
-
-/** @returns {string} localized family label. */
-function familyLabelOf(family, t) {
-  if (family === 'grok') return t('widget.family.grok');
-  if (family === 'zai') return t('widget.family.zai');
-  return t('widget.family.other');
-}
-
-/** @returns {string} validated external usage page URL. */
-function usagePageUrlOf(snapshot, overview) {
-  const config = isRecord(snapshot) && isRecord(snapshot.config) ? snapshot.config : null;
-  const override = config !== null && typeof config.usagePageUrl === 'string' ? config.usagePageUrl.trim() : '';
-  if (/^https?:\/\//i.test(override)) return override;
-  const family = familyIdOf(snapshot, overview);
-  if (family === 'zai') return FAMILY_USAGE_PAGES.zai;
-  return FAMILY_USAGE_PAGES.grok;
-}
-
-/** @returns {number|null} available reset chances of one bucket, or null when unknown. */
-function resetAvailableOf(reset, bucket) {
-  if (!isRecord(reset)) return null;
-  const entry = reset[bucket];
-  if (!isRecord(entry) || !Array.isArray(entry.available)) return null;
-  // Only chances whose expiry is still in the future are redeemable; expired
-  // entries can linger in a cached payload and must not inflate the count.
-  const now = Date.now();
-  let count = 0;
-  for (const chance of entry.available) {
-    const expireAt = isRecord(chance) && typeof chance.expireAt === 'number' ? chance.expireAt : null;
-    if (expireAt !== null && expireAt > now) count += 1;
-  }
-  return count;
+/** @returns {string} remaining-percentage text (`72%`, `<1%`, or the dash placeholder). */
+function percentText(percent, locale, t) {
+  const value = clampPercent(percent);
+  if (value === null) return t('widget.value.dash');
+  if (value > 0 && value < 1) return t('widget.value.underOnePercent');
+  return formatPercent(value, locale, 0);
 }
 
 /** @returns {number|null} epoch ms of the most recent successful refresh. */
@@ -311,17 +181,18 @@ function openExternal(url) {
 }
 
 /**
- * Start the OAuth flow through the store, then open the authorize URL.
- * @param family - configured family id passed to the store login start.
+ * Start the device-code flow through the store, then open the authorization
+ * page (the completion code renders in the usage page's login card).
  */
-function requestSignIn(family) {
+function requestSignIn() {
   try {
-    const result = typeof state.startLogin === 'function'
-      ? state.startLogin({ family: typeof family === 'string' ? family : undefined })
-      : null;
-    Promise.resolve(result).then((authorizeUrl) => {
-      if (typeof authorizeUrl === 'string' && authorizeUrl !== '') {
-        openExternal(authorizeUrl);
+    const result = typeof state.startLogin === 'function' ? state.startLogin() : null;
+    Promise.resolve(result).then((flow) => {
+      const url = isRecord(flow)
+        ? (flow.verificationUriComplete ?? flow.verificationUri)
+        : null;
+      if (typeof url === 'string' && url !== '') {
+        openExternal(url);
       }
     }).catch(() => undefined);
   } catch {
@@ -440,21 +311,21 @@ function useProviderGate(sessionId) {
 }
 
 /**
- * Apply the configured provider allow-list to the live provider.
+ * Apply the Grok provider gate to the live provider.
  * @returns {boolean} whether the widget may render for this session.
  */
-function providerAllowed(config, gate) {
+function providerAllowed(gate) {
+  // The widget is Grok-only: an unavailable directory service keeps the widget
+  // visible (a missing service must not hide an otherwise-working plugin), but
+  // a known non-grok provider hides it.
   if (!isRecord(gate) || gate.available !== true) return true;
   if (typeof gate.provider !== 'string' || gate.provider === '') return true;
-  const allowed = asArray(isRecord(config) ? config.providerIds : null)
-    .filter((id) => typeof id === 'string' && id !== '');
-  if (allowed.length === 0) return true;
-  return allowed.includes(gate.provider);
+  return gate.provider === 'grok';
 }
 
 /* ------------------------------------------------------------------ */
 /* Widget sections that compose the shared primitives and add the      */
-/* composer-specific layout (trigger rows, limit rows, stat cells).    */
+/* composer-specific layout (trigger ring, stat cells).                */
 /* ------------------------------------------------------------------ */
 
 /** @returns {import('react').ReactElement} warning dot used for quiet error affordances. */
@@ -489,11 +360,10 @@ function StaleHint({ t }) {
 }
 
 /** @returns {import('react').ReactElement} sign-in notice for logged-out and expired sessions. */
-function SignInNotice({ t, loginExpired, login, onSignIn }) {
-  const stateName = isRecord(login) && typeof login.state === 'string' ? login.state : 'idle';
-  const pending = !loginExpired && (stateName === 'starting' || stateName === 'pending');
-  const failed = !loginExpired && stateName === 'failed';
-  const authorizeUrl = isRecord(login) && typeof login.authorizeUrl === 'string' ? login.authorizeUrl : '';
+function SignInNotice({ t, loginExpired, flow, onSignIn }) {
+  const flowState = isRecord(flow) && typeof flow.state === 'string' ? flow.state : 'idle';
+  const pending = !loginExpired && (flowState === 'starting' || flowState === 'pending');
+  const failed = !loginExpired && flowState === 'error';
   const message = loginExpired
     ? t('widget.login.expired')
     : pending
@@ -502,13 +372,7 @@ function SignInNotice({ t, loginExpired, login, onSignIn }) {
         ? t('widget.login.failed')
         : t('widget.login.loggedOut');
   let action = null;
-  if (pending && authorizeUrl !== '') {
-    action = h(Button, {
-      size: 'sm',
-      variant: 'ghost',
-      onClick: () => openExternal(authorizeUrl),
-    }, t('widget.action.openAuthorize'));
-  } else if (!pending) {
+  if (!pending) {
     action = h(Button, {
       size: 'sm',
       variant: 'primary',
@@ -522,102 +386,6 @@ function SignInNotice({ t, loginExpired, login, onSignIn }) {
   });
 }
 
-/** @returns {import('react').ReactElement} empty state when the account has no Coding Plan. */
-function NoPlanNotice({ t, usagePageUrl }) {
-  return h(EmptyState, {
-    icon: 'gauge',
-    title: t('widget.state.noPlan'),
-    body: t('widget.state.noPlanHint'),
-    action: h('a', {
-      className: 'grk-widget-link',
-      href: usagePageUrl,
-      target: '_blank',
-      rel: 'noopener noreferrer',
-    },
-    t('widget.action.openUsagePage'),
-    h(Icon, { name: 'external', size: 12 })),
-  });
-}
-
-/** @returns {string} compact amount text, or null when the amount is unusable. */
-function amountText(value, locale) {
-  if (finiteNumber(value) === null || value <= 0) return null;
-  return compactNumber(value, locale);
-}
-
-/** @returns {import('react').ReactElement} one primary limit bar with values and countdown. */
-function LimitRow({ t, limit, bucket, now, locale }) {
-  const percent = remainingPercentOf(limit);
-  const total = isRecord(limit) ? limitTotal(limit) : 0;
-  const totalText = amountText(total, locale);
-  const remainingText = totalText === null ? null : compactNumber(remainingOf(limit), locale);
-  const values = remainingText !== null && totalText !== null
-    ? t('widget.limit.remainingOf', { remaining: remainingText, total: totalText })
-    : t('widget.limit.unknown');
-  return h('div', { className: 'grk-widget-limit' },
-    h('div', { className: 'grk-widget-limit-head' },
-      h('span', { className: 'grk-widget-limit-label' }, windowLabelOf(bucket, t)),
-      h('span', { className: `grk-widget-limit-pct${textToneClass(percent)}` }, percentText(percent, locale, t)),
-    ),
-    h(Bar, { percent: percent ?? 0, tone: toneOf(percent), height: 6 }),
-    h('div', { className: 'grk-widget-limit-meta' },
-      h('span', null, values),
-      h('span', null, resetTextOf(limit, now, t)),
-    ),
-  );
-}
-
-/** @returns {string} display name of a tool/MCP or unclassified limit. */
-function toolNameOf(limit, bucket, t) {
-  if (bucket === 'tool') {
-    const details = isRecord(limit) ? asArray(limit.usageDetails) : [];
-    for (const detail of details) {
-      if (isRecord(detail) && typeof detail.displayName === 'string' && detail.displayName.trim() !== '') {
-        return detail.displayName.trim();
-      }
-    }
-  }
-  return windowLabelOf(bucket, t);
-}
-
-/** @returns {import('react').ReactElement} compact secondary limit row. */
-function ToolRow({ t, limit, bucket, locale }) {
-  const percent = remainingPercentOf(limit);
-  const name = toolNameOf(limit, bucket, t);
-  return h('div', { className: 'grk-widget-tool-row' },
-    h('span', { className: 'grk-widget-tool-label', title: name }, name),
-    h(Bar, { percent: percent ?? 0, tone: toneOf(percent), height: 4 }),
-    h('span', { className: 'grk-widget-tool-pct' }, percentText(percent, locale, t)),
-  );
-}
-
-/** @returns {import('react').ReactElement} primary limits section. */
-function LimitsSection({ t, limits, now, locale }) {
-  if (limits.fiveHour === null && limits.week === null && limits.extras.length === 0) {
-    return h('div', { className: 'grk-widget-empty' },
-      h('span', { className: 'grk-widget-empty-hint' }, t('widget.limit.none')),
-    );
-  }
-  const rows = [];
-  if (limits.fiveHour !== null) {
-    rows.push(h(LimitRow, { key: 'fiveHour', t, limit: limits.fiveHour, bucket: 'fiveHour', now, locale }));
-  }
-  if (limits.week !== null) {
-    rows.push(h(LimitRow, { key: 'week', t, limit: limits.week, bucket: 'week', now, locale }));
-  }
-  const extraRows = limits.extras.slice(0, 3).map(({ limit, bucket }, index) => h(ToolRow, {
-    key: `extra-${index}`,
-    t,
-    limit,
-    bucket,
-    locale,
-  }));
-  return h('div', { className: 'grk-widget-section' },
-    h('div', { className: 'grk-widget-limits' }, rows),
-    extraRows.length === 0 ? null : h('div', { className: 'grk-widget-tools' }, extraRows),
-  );
-}
-
 /** @returns {import('react').ReactElement} one quick-stat cell. */
 function StatCell({ label, value }) {
   return h('div', { className: 'grk-widget-stat' },
@@ -626,66 +394,62 @@ function StatCell({ label, value }) {
   );
 }
 
-/** @returns {string|null} formatted date/time, or null when the value is unusable. */
-function dateTimeText(value, locale) {
-  const ms = toMs(value);
-  if (ms === null) return null;
-  const text = formatDateTime(ms, locale);
-  return typeof text === 'string' && text !== '' ? text : null;
-}
-
-/** @returns {string|null} plan renewal/expiry line, or null when the plan has no date. */
-function planLineOf(subscription, t, locale) {
-  if (!isRecord(subscription)) return null;
-  const renew = dateTimeText(subscription.renewTime, locale);
-  const expire = dateTimeText(subscription.expireAt, locale);
-  const autoRenew = subscription.autoRenew !== false;
-  if (renew !== null && autoRenew) return t('widget.plan.renews', { date: renew });
-  if (expire !== null) return t('widget.plan.expires', { date: expire });
-  if (renew !== null) return t('widget.plan.renews', { date: renew });
-  return null;
-}
-
-/** @returns {import('react').ReactElement} quick stats grid with today's usage and reset chances. */
-function StatsSection({ t, snapshot, overview, locale }) {
-  const usage = isRecord(snapshot) && isRecord(snapshot.usage) ? snapshot.usage : null;
-  const summary = usage !== null && isRecord(usage.summary) ? usage.summary : null;
-  const loading = isRecord(snapshot) && isRecord(snapshot.loading) ? snapshot.loading : {};
-  const loadingUsage = loading.usage === true;
-  const reset = isRecord(snapshot) && isRecord(snapshot.reset)
-    ? snapshot.reset
-    : (isRecord(overview) && isRecord(overview.reset) ? overview.reset : null);
-  const tokens = summary === null ? null : amountText(summary.totalTokens, locale);
-  const calls = summary === null ? null : amountText(summary.totalCalls, locale);
-  const fiveResets = resetAvailableOf(reset, 'fiveHour');
-  const weekResets = resetAvailableOf(reset, 'week');
-  const fallbackValue = loadingUsage ? t('widget.value.loading') : t('widget.value.unavailable');
-  const planLine = isRecord(overview) ? planLineOf(overview.subscription, t, locale) : null;
+/**
+ * Credit section of the popover: the remaining-percentage headline with its
+ * bar, the current period with its reset countdown, and the prepaid balance.
+ * @returns {import('react').ReactElement} the credit section.
+ */
+function CreditSection({ t, locale, overview, now }) {
+  const billing = isRecord(overview) && isRecord(overview.billing) ? overview.billing : null;
+  if (billing === null || billing.error != null) {
+    return h('div', { className: 'grk-widget-empty' },
+      h('span', { className: 'grk-widget-empty-hint' }, t('widget.credit.none')),
+    );
+  }
+  const remaining = remainingPercentOf(overview);
+  const prepaid = finiteNumber(billing.prepaidBalanceUsd);
+  const periodEnd = toMs(billing.currentPeriod?.end);
+  const cells = [
+    h(StatCell, {
+      key: 'remaining',
+      label: t('widget.credit.remaining'),
+      value: percentText(remaining, locale, t),
+    }),
+  ];
+  if (periodEnd !== null) {
+    cells.push(h(StatCell, {
+      key: 'reset',
+      label: t('widget.credit.resets'),
+      value: periodEnd > now ? countdown(periodEnd, t, now) : t('time.resetDue'),
+    }));
+  }
+  if (prepaid !== null) {
+    cells.push(h(StatCell, {
+      key: 'prepaid',
+      label: t('widget.credit.prepaid'),
+      value: formatUsd(prepaid, locale),
+    }));
+  }
   return h('div', { className: 'grk-widget-section' },
-    h('div', { className: 'grk-widget-stats' },
-      h(StatCell, { key: 'tokens', label: t('widget.stats.todayTokens'), value: tokens ?? fallbackValue }),
-      h(StatCell, { key: 'calls', label: t('widget.stats.todayCalls'), value: calls ?? fallbackValue }),
-      h(StatCell, {
-        key: 'resets-5h',
-        label: t('widget.stats.fiveHourResets'),
-        value: fiveResets === null ? t('widget.value.unavailable') : String(fiveResets),
-      }),
-      h(StatCell, {
-        key: 'resets-week',
-        label: t('widget.stats.weekResets'),
-        value: weekResets === null ? t('widget.value.unavailable') : String(weekResets),
-      }),
-    ),
-    planLine === null ? null : h('div', { className: 'grk-widget-plan-line' }, planLine),
-  );
+    h('div', { className: 'grk-widget-credit-head' },
+      h('span', { className: `grk-widget-credit-pct${textToneClass(remaining)}` },
+        percentText(remaining, locale, t)),
+      h('span', { className: 'grk-widget-credit-caption' }, t('widget.credit.remainingCaption'))),
+    h(Bar, {
+      percent: remaining ?? 0,
+      tone: toneOf(remaining),
+      height: 6,
+      label: t('widget.credit.barLabel', { percent: percentText(remaining, locale, t) }),
+    }),
+    h('div', { className: 'grk-widget-stats' }, cells));
 }
 
-/** @returns {import('react').ReactElement} popover header with the plan title and controls. */
-function PopoverHeader({ t, planName, familyLabel, busy, onRefresh, onClose }) {
+/** @returns {import('react').ReactElement} popover header with the account title and controls. */
+function PopoverHeader({ t, title, busy, onRefresh, onClose }) {
   return h('div', { className: 'grk-widget-pop-head' },
     h('div', { className: 'grk-widget-pop-titles' },
-      h('span', { className: 'grk-widget-plan', title: planName }, planName),
-      h('span', { className: 'grk-widget-sub' }, familyLabel),
+      h('span', { className: 'grk-widget-plan', title }, title),
+      h('span', { className: 'grk-widget-sub' }, t('widget.subtitle')),
     ),
     h('div', { className: 'grk-widget-pop-actions' },
       h(IconButton, {
@@ -704,18 +468,18 @@ function PopoverHeader({ t, planName, familyLabel, busy, onRefresh, onClose }) {
 }
 
 /** @returns {import('react').ReactElement} popover footer with freshness and navigation. */
-function PopoverFooter({ t, now, lastUpdated, onViewStats, usagePageUrl }) {
+function PopoverFooter({ t, now, lastUpdated, onViewStats }) {
   return h('div', { className: 'grk-widget-pop-foot' },
     h('span', { className: 'grk-widget-updated' }, relativeUpdatedTextOf(lastUpdated, now, t)),
     h('div', { className: 'grk-widget-foot-row' },
       h(Button, { size: 'sm', variant: 'subtle', onClick: onViewStats }, t('widget.action.viewStats')),
       h('a', {
         className: 'grk-widget-link',
-        href: usagePageUrl,
+        href: SUPERGROK_URL,
         target: '_blank',
         rel: 'noopener noreferrer',
       },
-      t('widget.action.openUsagePage'),
+      t('widget.action.openSupergrok'),
       h(Icon, { name: 'external', size: 12 })),
     ),
   );
@@ -773,7 +537,7 @@ function samePosition(previous, next) {
 }
 
 /**
- * Floating remaining-quota popover. Mounted only while open; every listener and
+ * Floating credit popover. Mounted only while open; every listener and
  * observer it adds is removed on unmount.
  * @param props - `t`, store `snapshot`, trigger/root refs, close callback.
  * @returns {import('react').ReactElement} the fixed-position popover.
@@ -866,25 +630,15 @@ function WidgetPopover({ t, snapshot, triggerRef, rootRef, onClose, locale }) {
   }, [onClose, rootRef, triggerRef]);
 
   const overview = isRecord(snapshot.overview) ? snapshot.overview : null;
-  const auth = isRecord(snapshot.auth) ? snapshot.auth : null;
-  const login = isRecord(snapshot.login) ? snapshot.login : {};
+  const loggedIn = snapshot.loggedIn === true;
+  const loginExpired = snapshot.loginExpired === true;
   const loading = isRecord(snapshot.loading) ? snapshot.loading : {};
-  const loggedIn = auth !== null && auth.loggedIn === true;
-  const loginExpired = auth !== null && auth.loginExpired === true;
   const busy = loading.overview === true;
-  const limits = limitsOf(overview);
-  const planName = planNameOf(overview, t);
-  const familyLabel = familyLabelOf(familyIdOf(snapshot, overview), t);
-  const usagePageUrl = usagePageUrlOf(snapshot, overview);
+  const user = overview !== null && isRecord(overview.user) ? overview.user : null;
+  const email = user !== null && typeof user.email === 'string' && user.email !== '' ? user.email : null;
+  const title = email !== null ? email : t('widget.title');
   const lastUpdated = lastUpdatedMsOf(snapshot, overview);
   const errorRecord = isRecord(snapshot.error) ? snapshot.error : (overview !== null && isRecord(overview.error) ? overview.error : null);
-  const errorCode = errorRecord !== null && typeof errorRecord.code === 'string' ? errorRecord.code : '';
-  const subscription = overview !== null && isRecord(overview.subscription) ? overview.subscription : null;
-  const hasQuota = overview !== null && (isRecord(overview.quota) || isRecord(overview.subscription));
-  const inactiveSubscription = subscription !== null
-    && subscription.active === false
-    && (overview === null || !isRecord(overview.quota));
-  const noPlan = errorCode === 'no_coding_plan' || (overview !== null && !hasQuota) || inactiveSubscription;
   const stale = overview !== null && overview.stale === true;
 
   const refresh = () => {
@@ -902,11 +656,10 @@ function WidgetPopover({ t, snapshot, triggerRef, rootRef, onClose, locale }) {
     } catch {
       /* fall through to the external page */
     }
-    openExternal(usagePageUrl);
+    openExternal(SUPERGROK_URL);
   };
   const signIn = () => {
-    const config = isRecord(snapshot.config) ? snapshot.config : null;
-    requestSignIn(config !== null && typeof config.family === 'string' ? config.family : undefined);
+    requestSignIn();
   };
 
   const body = [];
@@ -915,25 +668,28 @@ function WidgetPopover({ t, snapshot, triggerRef, rootRef, onClose, locale }) {
       key: 'sign-in',
       t,
       loginExpired,
-      login,
+      flow: snapshot.flow,
       onSignIn: signIn,
     }));
   } else if (busy && overview === null) {
-    body.push(h(Skeleton, { key: 'skeleton', lines: 5 }));
+    body.push(h(Skeleton, { key: 'skeleton', lines: 4 }));
   } else if (errorRecord !== null && overview === null) {
     body.push(h(ErrorNotice, { key: 'error', t, onRetry: refresh, stale: false }));
-  } else if (noPlan) {
-    body.push(h(NoPlanNotice, { key: 'no-plan', t, usagePageUrl }));
-  } else if (overview === null) {
-    body.push(h(Skeleton, { key: 'skeleton', lines: 5 }));
+  } else if (overview === null || overview.error != null) {
+    body.push(h(EmptyState, {
+      key: 'empty',
+      icon: 'gauge',
+      title: t('widget.state.noData'),
+      body: t('widget.state.noDataHint'),
+      action: h(Button, { size: 'sm', variant: 'subtle', onClick: refresh }, t('widget.action.retry')),
+    }));
   } else {
     if (errorRecord !== null) {
       body.push(h(ErrorNotice, { key: 'error', t, onRetry: refresh, stale }));
     } else if (stale) {
       body.push(h(StaleHint, { key: 'stale', t }));
     }
-    body.push(h(LimitsSection, { key: 'limits', t, limits, now, locale }));
-    body.push(h(StatsSection, { key: 'stats', t, snapshot, overview, locale }));
+    body.push(h(CreditSection, { key: 'credit', t, locale, overview, now }));
   }
 
   // No placement yet (first layout effect has not run): render nothing rather
@@ -949,8 +705,7 @@ function WidgetPopover({ t, snapshot, triggerRef, rootRef, onClose, locale }) {
   },
   h(PopoverHeader, {
     t,
-    planName,
-    familyLabel,
+    title,
     busy,
     onRefresh: refresh,
     onClose,
@@ -961,13 +716,12 @@ function WidgetPopover({ t, snapshot, triggerRef, rootRef, onClose, locale }) {
     now,
     lastUpdated,
     onViewStats: viewStats,
-    usagePageUrl,
   }),
   );
 }
 
 /**
- * Compact remaining-quota trigger for the composer tool row plus its popover.
+ * Compact remaining-credit trigger for the composer tool row plus its popover.
  * @param props - slot props: localized `t` and the branded `sessionId`.
  * @returns {import('react').ReactElement|null} the trigger, or null when gated out.
  */
@@ -983,13 +737,12 @@ export function ComposerIndicator({ t: translate, sessionId }) {
   const gate = useProviderGate(sessionId);
 
   const config = isRecord(snapshot.config) ? snapshot.config : null;
-  const auth = isRecord(snapshot.auth) ? snapshot.auth : null;
-  const loggedIn = auth !== null && auth.loggedIn === true;
-  const loginExpired = auth !== null && auth.loginExpired === true;
+  const loggedIn = snapshot.loggedIn === true;
+  const loginExpired = snapshot.loginExpired === true;
   const showWhenLoggedOut = config !== null && config.showIndicatorWhenLoggedOut === true;
   const visible = config !== null
     && (loggedIn || loginExpired || showWhenLoggedOut)
-    && providerAllowed(config, gate);
+    && providerAllowed(gate);
 
   const close = React.useCallback(() => {
     setOpen(false);
@@ -1016,8 +769,6 @@ export function ComposerIndicator({ t: translate, sessionId }) {
 
   React.useEffect(() => {
     if (!open) return undefined;
-    void callState('loadUsage', 'today');
-    void callState('loadReset', { force: false });
     return subscribePanelChange(close);
   }, [open, close]);
 
@@ -1028,7 +779,7 @@ export function ComposerIndicator({ t: translate, sessionId }) {
 
   const overview = isRecord(snapshot.overview) ? snapshot.overview : null;
   const loading = isRecord(snapshot.loading) ? snapshot.loading : {};
-  const title = triggerTitleOf({ t, snapshot, overview, loggedIn, loginExpired, now, locale });
+  const title = triggerTitleOf({ t, overview, loggedIn, loginExpired, now, locale });
   const ariaLabel = loginExpired
     ? t('widget.trigger.expiredTooltip')
     : loggedIn
@@ -1044,22 +795,14 @@ export function ComposerIndicator({ t: translate, sessionId }) {
   } else if (loading.overview === true && overview === null) {
     content = h(Spinner, { size: 12 });
   } else {
-    const limits = limitsOf(overview);
-    const fiveHour = remainingPercentOf(limits.fiveHour);
-    const week = remainingPercentOf(limits.week);
-    if (fiveHour === null && week === null) {
+    const remaining = remainingPercentOf(overview);
+    if (remaining === null) {
       content = h('span', { className: 'grk-widget-unavailable' },
         h(WarningDot, null),
         h('span', { className: 'grk-widget-dash' }, t('widget.value.dash')),
       );
     } else {
-      // Two independent rings (5-hour, then weekly — the popover's order):
-      // side-by-side keeps both windows readable, and each ring keeps its own
-      // fixed hue so the pair stays distinguishable in light and dark themes.
-      content = h('span', { className: 'grk-widget-rings' },
-        triggerRing(fiveHour, 'fiveHour'),
-        triggerRing(week, 'week'),
-      );
+      content = h('span', { className: 'grk-widget-rings' }, triggerRing(remaining));
     }
   }
 
@@ -1090,174 +833,135 @@ export function ComposerIndicator({ t: translate, sessionId }) {
 
 /**
  * One trigger progress ring: a 16x16 inline SVG whose arc length is the
- * remaining fraction of one quota window. The composer trigger is a
- * `<button>`, so the glyph stays phrasing content; a window without data
- * renders its track only, keeping the pair visually balanced.
- * @param percent - remaining percentage of the window, or null when unknown.
- * @param key - stable element key (`fiveHour` | `week`).
+ * REMAINING credit fraction, with the remaining percentage centered inside.
+ * The composer trigger is a `<button>`, so the glyph stays phrasing content.
+ * @param percent - remaining percentage, or null when unknown.
  * @returns {import('react').ReactElement} trigger ring glyph.
  */
-function triggerRing(percent, key) {
+function triggerRing(percent) {
   const value = clampPercent(percent);
   const radius = 9.25;
   const circumference = 2 * Math.PI * radius;
   const fraction = value === null ? 0 : Math.min(100, Math.max(0, value)) / 100;
   // MUI CircularProgressWithLabel pattern: the rounded percentage sits centered
-  // inside the ring; a window without data keeps the glyph balanced with a dash.
+  // inside the ring; unknown credit keeps the glyph balanced with a dash.
   const label = value === null ? '\u2013' : String(Math.round(value));
+  const toneClass = value === null ? '' : value < 5 ? ' is-critical' : value < 20 ? ' is-warning' : '';
   return h('svg', {
-    key,
-    className: 'grk-widget-ring',
+    className: `grk-widget-ring${toneClass}`,
     viewBox: '0 0 24 24',
     'aria-hidden': 'true',
     focusable: 'false',
   },
-    h('circle', { className: 'grk-widget-ring-track', cx: 12, cy: 12, r: radius }),
-    h('circle', {
-      className: `grk-widget-ring-arc grk-widget-ring-arc-${key}`,
-      cx: 12,
-      cy: 12,
-      r: radius,
-      transform: 'rotate(-90 12 12)',
-      strokeDasharray: `${(circumference * fraction).toFixed(2)} ${circumference.toFixed(2)}`,
-    }),
-    h('text', {
-      className: 'grk-widget-ring-text',
-      x: 12,
-      y: 12,
-      textAnchor: 'middle',
-      dominantBaseline: 'central',
-    }, label));
+  h('circle', { className: 'grk-widget-ring-track', cx: 12, cy: 12, r: radius }),
+  h('circle', {
+    className: 'grk-widget-ring-arc',
+    cx: 12,
+    cy: 12,
+    r: radius,
+    transform: 'rotate(-90 12 12)',
+    strokeDasharray: `${(circumference * fraction).toFixed(2)} ${circumference.toFixed(2)}`,
+  }),
+  h('text', {
+    className: 'grk-widget-ring-text',
+    x: 12,
+    y: 12,
+    textAnchor: 'middle',
+    dominantBaseline: 'central',
+  }, label));
 }
 
 /** @returns {string} localized tooltip/aria-label for the trigger. */
-function triggerTitleOf({ t, snapshot, overview, loggedIn, loginExpired, now, locale }) {
+function triggerTitleOf({ t, overview, loggedIn, loginExpired, now, locale }) {
   if (loginExpired) return t('widget.trigger.expiredTooltip');
   if (!loggedIn) return t('widget.trigger.loginTooltip');
-  const loading = isRecord(snapshot.loading) ? snapshot.loading : {};
-  if (loading.overview === true && overview === null) return t('widget.trigger.loading');
-  const limits = limitsOf(overview);
-  const fiveHour = remainingPercentOf(limits.fiveHour);
-  const week = remainingPercentOf(limits.week);
-  if (fiveHour === null && week === null) return t('widget.trigger.unavailable');
-  const plan = planNameOf(overview, t);
-  const fiveHourText = percentText(fiveHour, locale, t);
-  const weekText = percentText(week, locale, t);
-  const nearestReset = nearestResetTextOf(limits, now, t);
-  if (nearestReset === null) {
-    return t('widget.trigger.tooltipNoReset', { plan, fiveHour: fiveHourText, week: weekText });
+  const remaining = remainingPercentOf(overview);
+  if (remaining === null) return t('widget.trigger.unavailable');
+  const remainingText = percentText(remaining, locale, t);
+  const periodEnd = toMs(overview?.billing?.currentPeriod?.end);
+  if (periodEnd === null) {
+    return t('widget.trigger.tooltipNoReset', { remaining: remainingText });
   }
-  return t('widget.trigger.tooltip', { plan, fiveHour: fiveHourText, week: weekText, reset: nearestReset });
+  const reset = periodEnd > now ? t('widget.trigger.resetIn', { time: countdown(periodEnd, t, now) }) : t('time.resetDue');
+  return t('widget.trigger.tooltip', { remaining: remainingText, reset });
 }
 
 /** Locale dictionaries owned by this module. Flat keys, `widget.` prefix. */
 export const indicatorDicts = {
   zh: {
-    'widget.trigger.aria': '查看编程套餐剩余额度',
-    'widget.trigger.tooltip': '{plan}：5 小时窗口剩余 {fiveHour}，每周窗口剩余 {week}。{reset}',
-    'widget.trigger.tooltipNoReset': '{plan}：5 小时窗口剩余 {fiveHour}，每周窗口剩余 {week}',
-    'widget.trigger.loading': '正在获取编程套餐额度…',
+    'widget.title': 'Grok 订阅',
+    'widget.subtitle': '额度与余额',
+    'widget.trigger.aria': '查看 Grok 订阅剩余额度',
+    'widget.trigger.tooltip': 'Grok 订阅剩余 {remaining}。{reset}',
+    'widget.trigger.tooltipNoReset': 'Grok 订阅剩余 {remaining}',
+    'widget.trigger.resetIn': '{time}后重置',
     'widget.trigger.unavailable': '暂时无法获取额度信息',
     'widget.trigger.login': '登录',
-    'widget.trigger.loginTooltip': '登录 Grok 查看编程套餐剩余额度',
+    'widget.trigger.loginTooltip': '登录 Grok 查看订阅剩余额度',
     'widget.trigger.expiredTooltip': '登录已过期，重新登录后可查看额度',
-    'widget.dialog.label': '编程套餐剩余额度',
-    'widget.plan.fallback': 'GLM 编程套餐',
-    'widget.plan.level': 'GLM 编程套餐 {level}',
-    'widget.family.grok': 'Grok',
-    'widget.family.zai': 'Z.AI',
-    'widget.family.other': '编程套餐',
+    'widget.dialog.label': 'Grok 订阅剩余额度',
     'widget.action.refresh': '刷新',
     'widget.action.close': '关闭',
     'widget.action.retry': '重试',
-    'widget.action.viewStats': '查看完整统计',
-    'widget.action.openUsagePage': '打开用量页面',
-    'widget.action.signIn': '登录',
+    'widget.action.viewStats': '查看完整用量',
+    'widget.action.openSupergrok': '打开 SuperGrok',
+    'widget.action.signIn': '登录 Grok',
     'widget.action.relogin': '重新登录',
-    'widget.action.openAuthorize': '打开授权页面',
-    'widget.window.fiveHour': '5 小时窗口',
-    'widget.window.week': '每周窗口',
-    'widget.window.tool': 'MCP 工具',
-    'widget.window.other': '其他额度',
-    'widget.limit.remainingOf': '剩余 {remaining} / {total}',
-    'widget.limit.unknown': '额度未知',
-    'widget.limit.none': '暂无额度数据',
-    'widget.reset.in': '{time}后重置',
-    'widget.reset.soon': '即将重置',
-    'widget.reset.unknown': '重置时间未知',
-    'widget.stats.todayTokens': '今日 Token',
-    'widget.stats.todayCalls': '今日调用',
-    'widget.stats.fiveHourResets': '5 小时重置机会',
-    'widget.stats.weekResets': '每周重置机会',
-    'widget.value.unavailable': '—',
-    'widget.value.loading': '…',
+    'widget.credit.remaining': '剩余额度',
+    'widget.credit.remainingCaption': '当前周期剩余订阅额度',
+    'widget.credit.barLabel': '剩余 {percent}',
+    'widget.credit.resets': '周期重置',
+    'widget.credit.prepaid': '预付费余额',
+    'widget.credit.none': '暂无额度数据',
     'widget.value.dash': '--',
     'widget.value.underOnePercent': '<1%',
-    'widget.plan.renews': '续费于 {date}',
-    'widget.plan.expires': '到期于 {date}',
     'widget.updated': '更新于 {time}',
     'widget.updated.justNow': '刚刚更新',
     'widget.updated.never': '尚未更新',
     'widget.state.error': '加载失败，请稍后重试',
     'widget.state.stale': '数据可能不是最新',
-    'widget.state.noPlan': '该账号暂无编程套餐',
-    'widget.state.noPlanHint': '登录已开通编程套餐的 Grok 账号后即可查看剩余额度。',
-    'widget.login.loggedOut': '登录 Grok 后可查看编程套餐剩余额度',
+    'widget.state.noData': '暂无额度数据',
+    'widget.state.noDataHint': '刷新或稍后重试，即可查看订阅额度。',
+    'widget.login.loggedOut': '登录 Grok 后可查看订阅剩余额度',
     'widget.login.expired': '登录已过期，请重新登录',
     'widget.login.pending': '在浏览器中完成授权…',
     'widget.login.failed': '登录失败，请重试',
   },
   en: {
-    'widget.trigger.aria': 'View Coding Plan remaining quota',
-    'widget.trigger.tooltip': '{plan}: {fiveHour} left in the 5-hour window, {week} left weekly. {reset}',
-    'widget.trigger.tooltipNoReset': '{plan}: {fiveHour} left in the 5-hour window, {week} left weekly',
-    'widget.trigger.loading': 'Loading Coding Plan quota…',
-    'widget.trigger.unavailable': 'Quota unavailable right now',
+    'widget.title': 'Grok subscription',
+    'widget.subtitle': 'Credit & balance',
+    'widget.trigger.aria': 'View Grok subscription credit',
+    'widget.trigger.tooltip': '{remaining} credit left on your Grok subscription. {reset}',
+    'widget.trigger.tooltipNoReset': '{remaining} credit left on your Grok subscription',
+    'widget.trigger.resetIn': 'Resets in {time}',
+    'widget.trigger.unavailable': 'Credit unavailable right now',
     'widget.trigger.login': 'Sign in',
-    'widget.trigger.loginTooltip': 'Sign in to view your Coding Plan remaining quota',
-    'widget.trigger.expiredTooltip': 'Sign-in expired. Sign in again to see your quota.',
-    'widget.dialog.label': 'Coding Plan remaining quota',
-    'widget.plan.fallback': 'GLM Coding Plan',
-    'widget.plan.level': 'GLM Coding Plan {level}',
-    'widget.family.grok': 'Grok',
-    'widget.family.zai': 'Z.AI',
-    'widget.family.other': 'Coding Plan',
+    'widget.trigger.loginTooltip': 'Sign in to view your Grok subscription credit',
+    'widget.trigger.expiredTooltip': 'Sign-in expired. Sign in again to see your credit.',
+    'widget.dialog.label': 'Grok subscription credit',
     'widget.action.refresh': 'Refresh',
     'widget.action.close': 'Close',
     'widget.action.retry': 'Retry',
-    'widget.action.viewStats': 'View full statistics',
-    'widget.action.openUsagePage': 'Open usage page',
-    'widget.action.signIn': 'Sign in',
+    'widget.action.viewStats': 'View full usage',
+    'widget.action.openSupergrok': 'Open SuperGrok',
+    'widget.action.signIn': 'Sign in to Grok',
     'widget.action.relogin': 'Sign in again',
-    'widget.action.openAuthorize': 'Open authorization page',
-    'widget.window.fiveHour': '5-hour window',
-    'widget.window.week': 'Weekly window',
-    'widget.window.tool': 'MCP tools',
-    'widget.window.other': 'Other quota',
-    'widget.limit.remainingOf': '{remaining} of {total} left',
-    'widget.limit.unknown': 'Quota unavailable',
-    'widget.limit.none': 'No quota data',
-    'widget.reset.in': 'Resets in {time}',
-    'widget.reset.soon': 'Resetting soon',
-    'widget.reset.unknown': 'Reset time unavailable',
-    'widget.stats.todayTokens': "Today's tokens",
-    'widget.stats.todayCalls': "Today's calls",
-    'widget.stats.fiveHourResets': '5-hour reset chances',
-    'widget.stats.weekResets': 'Weekly reset chances',
-    'widget.value.unavailable': '—',
-    'widget.value.loading': '…',
+    'widget.credit.remaining': 'Credit left',
+    'widget.credit.remainingCaption': 'Subscription credit left this period',
+    'widget.credit.barLabel': '{percent} left',
+    'widget.credit.resets': 'Period resets',
+    'widget.credit.prepaid': 'Prepaid balance',
+    'widget.credit.none': 'No credit data',
     'widget.value.dash': '--',
     'widget.value.underOnePercent': '<1%',
-    'widget.plan.renews': 'Renews {date}',
-    'widget.plan.expires': 'Expires {date}',
     'widget.updated': 'Updated {time}',
     'widget.updated.justNow': 'Updated just now',
     'widget.updated.never': 'Not updated yet',
     'widget.state.error': "Couldn't load data. Try again.",
     'widget.state.stale': 'Data may be out of date',
-    'widget.state.noPlan': 'No Coding Plan found for this account',
-    'widget.state.noPlanHint': 'Sign in with a Grok account that has an active Coding Plan to see the remaining quota.',
-    'widget.login.loggedOut': 'Sign in to Grok to see your Coding Plan remaining quota',
+    'widget.state.noData': 'No credit data',
+    'widget.state.noDataHint': 'Refresh or try again later to see your subscription credit.',
+    'widget.login.loggedOut': 'Sign in to Grok to see your subscription credit',
     'widget.login.expired': 'Your sign-in expired. Sign in again.',
     'widget.login.pending': 'Finish signing in in your browser…',
     'widget.login.failed': 'Sign-in failed. Try again.',
@@ -1329,18 +1033,19 @@ export const indicatorCss = `
 
 .grk-widget-ring-arc {
   fill: none;
+  /* Data fill: --dsw-alias-brand-primary is the monochrome button color,
+     never a data hue. */
+  stroke: var(--dsw-alias-state-business-primary, var(--dsw-alias-link));
   stroke-width: 2.5px;
   stroke-linecap: round;
 }
 
-/* One fixed hue per window, mirroring the usage page's series palette:
-   --dsw-alias-brand-primary is the monochrome button color, never a data hue. */
-.grk-widget-ring-arc-fiveHour {
-  stroke: var(--dsw-alias-state-business-primary, var(--dsw-alias-link));
+.grk-widget-ring.is-warning .grk-widget-ring-arc {
+  stroke: var(--dsw-alias-state-warn-primary);
 }
 
-.grk-widget-ring-arc-week {
-  stroke: var(--dsw-alias-state-success-primary);
+.grk-widget-ring.is-critical .grk-widget-ring-arc {
+  stroke: var(--dsw-alias-state-error-primary);
 }
 
 .grk-widget-ring-text {
@@ -1488,35 +1193,23 @@ export const indicatorCss = `
   gap: 10px;
 }
 
-.grk-widget-limits,
-.grk-widget-tools {
-  display: flex;
-  flex-direction: column;
-  gap: 10px;
-}
-
-.grk-widget-limit {
-  display: flex;
-  flex-direction: column;
-  gap: 5px;
-}
-
-.grk-widget-limit-head {
+.grk-widget-credit-head {
   display: flex;
   align-items: baseline;
   justify-content: space-between;
   gap: 8px;
 }
 
-.grk-widget-limit-label {
-  font-size: 12px;
-  color: var(--dsw-alias-label-secondary);
+.grk-widget-credit-pct {
+  font-size: 18px;
+  font-weight: 600;
+  line-height: 1.2;
+  font-variant-numeric: tabular-nums;
 }
 
-.grk-widget-limit-pct {
-  font-size: 13px;
-  font-weight: 500;
-  font-variant-numeric: tabular-nums;
+.grk-widget-credit-caption {
+  font-size: 11px;
+  color: var(--dsw-alias-label-secondary);
 }
 
 .grk-widget-text-warn {
@@ -1525,47 +1218,6 @@ export const indicatorCss = `
 
 .grk-widget-text-error {
   color: var(--dsw-alias-state-error-primary);
-}
-
-.grk-widget-limit-meta {
-  display: flex;
-  align-items: baseline;
-  justify-content: space-between;
-  gap: 8px;
-  font-size: 11px;
-  color: var(--dsw-alias-label-secondary);
-}
-
-.grk-widget-limit-meta span {
-  white-space: nowrap;
-}
-
-.grk-widget-tool-row {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  font-size: 12px;
-  color: var(--dsw-alias-label-secondary);
-}
-
-.grk-widget-tool-row .grk-bar {
-  flex: 1;
-}
-
-.grk-widget-tool-label {
-  flex: none;
-  max-width: 120px;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.grk-widget-tool-pct {
-  flex: none;
-  min-width: 34px;
-  font-size: 11px;
-  font-variant-numeric: tabular-nums;
-  text-align: right;
 }
 
 .grk-widget-stats {
@@ -1599,11 +1251,6 @@ export const indicatorCss = `
   font-weight: 500;
   line-height: 1.3;
   font-variant-numeric: tabular-nums;
-}
-
-.grk-widget-plan-line {
-  font-size: 11px;
-  color: var(--dsw-alias-label-secondary);
 }
 
 .grk-widget-link {
@@ -1667,7 +1314,6 @@ export const indicatorCss = `
 .grk-widget-skeleton-line:nth-child(2) { width: 78%; }
 .grk-widget-skeleton-line:nth-child(3) { width: 58%; }
 .grk-widget-skeleton-line:nth-child(4) { width: 84%; }
-.grk-widget-skeleton-line:nth-child(5) { width: 46%; }
 
 @keyframes grk-widget-pulse {
   0%, 100% { opacity: 1; }

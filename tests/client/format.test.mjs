@@ -29,34 +29,13 @@ test('formatPercent formats, clamps, and tolerates missing values', () => {
   assert.equal(format.formatPercent(8, 'zh'), '8%');
 });
 
-test('remainingPercent inverts the used ratio and falls back to counts', () => {
-  assert.equal(format.remainingPercent({ percentage: 25 }), 75);
-  assert.equal(format.remainingPercent({ percentage: 0 }), 100);
-  assert.equal(format.remainingPercent({ percentage: 140 }), 0);
-  assert.equal(format.remainingPercent({ number: 100, remaining: 40 }), 40);
-  assert.equal(format.remainingPercent({ number: 100, usage: 70 }), 30);
-  assert.equal(format.remainingPercent(null), 0);
-  assert.equal(format.remainingPercent({}), 0);
-});
-
-test('limit totals, used, and remaining agree across payload shapes', () => {
-  const fromCounts = { number: 200, remaining: 50, percentage: 75 };
-  assert.equal(format.limitTotal(fromCounts), 200);
-  assert.equal(format.limitUsed(fromCounts), 150);
-  assert.equal(format.remainingOf(fromCounts), 50);
-
-  const fromUsage = { usage: 12, remaining: 8 };
-  assert.equal(format.limitTotal(fromUsage), 20);
-  assert.equal(format.limitUsed(fromUsage), 12);
-  assert.equal(format.remainingOf(fromUsage), 8);
-
-  const fromPercentage = { number: 80, percentage: 25 };
-  assert.equal(format.limitUsed(fromPercentage), 20);
-  assert.equal(format.remainingOf(fromPercentage), 60);
-
-  assert.equal(format.limitTotal(null), 0);
-  assert.equal(format.limitUsed(undefined), 0);
-  assert.equal(format.remainingOf({}), 0);
+test('formatUsd renders two fraction digits with the dollar sign', () => {
+  assert.equal(format.formatUsd(12.3), '$12.30');
+  assert.equal(format.formatUsd(12.345), '$12.35');
+  assert.equal(format.formatUsd(0, 'en'), '$0.00');
+  assert.equal(format.formatUsd(1234567.89, 'en'), '$1,234,567.89');
+  assert.equal(format.formatUsd(null), '');
+  assert.equal(format.formatUsd('nope'), '');
 });
 
 test('number helpers use Intl grouping and compact notation', () => {
@@ -66,17 +45,16 @@ test('number helpers use Intl grouping and compact notation', () => {
   assert.equal(format.formatCompact(1500, 'en'), '1.5K');
   assert.match(format.formatCompact(15000, 'zh'), /1\.5万/);
   assert.equal(format.formatCompact(null), '');
-  assert.equal(format.formatCredits(12.345), '12.35');
-  assert.equal(format.formatCredits(12, 'en', 'credits'), '12 credits');
-  assert.equal(format.formatCredits(undefined), '');
 });
 
-test('formatDateTime and formatResetAt format valid timestamps only', () => {
+test('formatDateTime/formatDate/formatResetAt format valid timestamps only', () => {
   assert.equal(format.formatDateTime(null), '');
   assert.equal(format.formatDateTime('not-a-date'), '');
   const fixed = new Date(2026, 4, 21, 15, 30, 0).getTime();
   assert.match(format.formatDateTime(fixed, 'en'), /2026/);
   assert.match(format.formatDateTime(fixed, 'zh'), /2026/);
+  assert.match(format.formatDate(fixed, 'en'), /2026/);
+  assert.equal(format.formatDate(null, 'en'), '');
 
   const sameDay = new Date(2026, 4, 21, 9, 5, 0).getTime();
   const now = new Date(2026, 4, 21, 8, 0, 0).getTime();
@@ -95,21 +73,6 @@ test('countdown localizes remaining time from a timestamp or a duration', () => 
   assert.equal(format.countdown(30_000, t, now), '1 min');
   assert.equal(format.countdown(null, t, now), '');
   assert.equal(format.countdown(2 * 60 * 60_000, makeT('zh'), now), '2 小时');
-});
-
-test('windowLabel resolves windows from the normalized field or legacy type/unit', () => {
-  const t = makeT('en');
-  assert.equal(format.resolveWindow({ window: 'week' }), 'week');
-  assert.equal(format.resolveWindow({ window: 'tool' }), 'tool');
-  assert.equal(format.resolveWindow({ unit: 3 }), 'fiveHour');
-  assert.equal(format.resolveWindow({ unit: 6 }), 'week');
-  assert.equal(format.resolveWindow({ type: 'TIME_LIMIT' }), 'tool');
-  assert.equal(format.resolveWindow({}), 'other');
-  assert.equal(format.resolveWindow(null), 'other');
-  assert.equal(format.windowLabel({ window: 'fiveHour' }, t), '5-hour');
-  assert.equal(format.windowLabel({ window: 'week' }, t), 'Weekly');
-  assert.equal(format.windowLabel({ type: 'TIME_LIMIT' }, t), 'Tools');
-  assert.equal(format.windowLabel({ unit: 3 }, makeT('zh')), '5 小时');
 });
 
 test('durationMinutes, formatRelative, and formatLocaleId', () => {
@@ -137,17 +100,11 @@ test('core dictionaries stay bilingual with matching placeholders', () => {
   const enKeys = Object.keys(coreDicts.en);
   assert.deepEqual(zhKeys.sort(), enKeys.sort());
   const required = [
-    'action.refresh', 'action.retry', 'action.close', 'action.cancel', 'action.save', 'action.login',
-    'action.logout', 'action.openUsagePage', 'action.viewDetails', 'action.confirm', 'action.back',
-    'state.loading', 'state.loadingSlow', 'state.error', 'state.networkError', 'state.notLoggedIn',
-    'state.loginExpired', 'state.noPlan', 'state.empty', 'state.updating', 'state.justNow',
+    'state.error', 'state.networkError', 'state.justNow',
     'state.minutesAgo', 'state.hoursAgo', 'state.daysAgo',
-    'auth.loginTitle', 'auth.loginBody', 'auth.loginButton', 'auth.loginWaiting', 'auth.loginWaitingHint',
-    'auth.loginFailed', 'auth.loginExpiredBody', 'auth.loginPopupBlocked', 'auth.account', 'auth.family',
-    'auth.expiresAt', 'auth.renewTime', 'auth.billingCycle', 'auth.billingCycleAutopay',
-    'auth.billingCycleRenew', 'auth.billingCycleNone', 'auth.logoutConfirm',
-    'app.nav', 'app.title', 'app.subtitle',
-    'time.today', 'time.tomorrow', 'time.resetIn', 'time.resetAt', 'time.hoursShort',
+    'auth.loginFailed', 'auth.loginCodeExpired',
+    'app.nav',
+    'time.resetDue', 'time.lessThanMinute', 'time.hoursShort',
     'time.minutesShort', 'time.daysShort',
   ];
   for (const key of required) {
@@ -225,55 +182,70 @@ function installFetch(routes) {
 }
 
 const baseConfig = {
-  family: 'grok',
   refreshMinutes: 30,
-  providerIds: ['zai-coding-cn'],
   showIndicatorWhenLoggedOut: false,
-  usagePageUrl: '',
+  webSearchEnabled: true,
+  searchModel: 'grok-4.6',
 };
-const loggedInAuth = { loggedIn: true, loginExpired: false, user: { name: 'Tester' }, account: null, family: 'grok' };
-const inferenceStatus = (overrides = {}) => ({
-  enabled: true,
-  available: true,
-  ref: 'ZAI_CODING_CN_API_KEY',
-  family: 'grok',
-  writtenAt: 1_700_000_000_000,
-  expiresAt: 1_700_000_360_000,
-  expiresInMs: 360_000,
-  error: null,
-  ...overrides,
+const loginView = {
+  email: 'tester@grok.com',
+  userId: 'user-1',
+  expiresAt: 1_800_000_000_000,
+  loggedInAt: 1_700_000_000_000,
+};
+const billingView = {
+  creditUsagePercent: 25,
+  currentPeriod: {
+    type: 'USAGE_PERIOD_TYPE_WEEKLY',
+    start: 1_700_000_000_000,
+    end: 1_700_601_200_000,
+  },
+  prepaidBalanceUsd: 12.5,
+  isUnifiedBillingUser: false,
+  subscriptionTier: 'supergrok_heavy',
+  onDemandEnabled: true,
+  history: [{ billingCycle: '2026-W45', includedUsedUsd: 3.2, onDemandUsedUsd: 0, totalUsedUsd: 3.2 }],
+};
+const overviewPayload = () => ok({
+  user: { userId: 'user-1', email: 'tester@grok.com', name: 'Tester', subscriptionTier: 'supergrok_heavy' },
+  billing: billingView,
+  topup: null,
+  stale: false,
+  generatedAt: 1_700_000_100_000,
 });
 const statusPayload = (overrides = {}) => ok({
   config: baseConfig,
-  auth: loggedInAuth,
-  login: { state: 'idle' },
+  loggedIn: true,
+  login: loginView,
+  pending: false,
+  ...overrides,
+});
+const flowStartPayload = (overrides = {}) => ok({
+  flowId: 'flow-1',
+  status: 'pending',
+  userCode: 'ABCD-1234',
+  verificationUri: 'https://auth.x.ai/device',
+  verificationUriComplete: 'https://auth.x.ai/device?code=ABCD-1234',
+  expiresAt: new Date(Date.now() + 10 * 60_000).toISOString(),
   ...overrides,
 });
 
-test('state.bootstrap loads config, auth, inference and login once and notifies subscribers', async () => {
+test('state.bootstrap loads config and login once and notifies subscribers', async () => {
   const { state } = await freshState();
-  const mock = installFetch({ 'GET /grok-balance/api/status': statusPayload({ inference: inferenceStatus() }) });
+  const mock = installFetch({ 'GET /grok-balance/api/status': statusPayload() });
   try {
     let notifications = 0;
     const unsubscribe = state.subscribe(() => {
       notifications += 1;
     });
     const before = state.getSnapshot();
-    assert.equal(before.inference, null, 'inference starts null');
+    assert.equal(before.login, null, 'login starts null');
     const snapshot = await state.bootstrap();
-    assert.equal(snapshot.config.family, 'grok');
-    assert.equal(snapshot.auth.loggedIn, true);
-    assert.equal(snapshot.login.state, 'idle');
-    assert.deepEqual(snapshot.inference, {
-      enabled: true,
-      available: true,
-      ref: 'ZAI_CODING_CN_API_KEY',
-      family: 'grok',
-      writtenAt: 1_700_000_000_000,
-      expiresAt: 1_700_000_360_000,
-      expiresInMs: 360_000,
-      error: null,
-    });
+    assert.equal(snapshot.config.refreshMinutes, 30);
+    assert.equal(snapshot.config.webSearchEnabled, true);
+    assert.equal(snapshot.loggedIn, true);
+    assert.equal(snapshot.login.email, 'tester@grok.com');
+    assert.equal(snapshot.login.expiresAt, 1_800_000_000_000);
     assert.notEqual(state.getSnapshot(), before);
     assert.ok(notifications > 0, 'subscribers are notified');
     await state.bootstrap();
@@ -299,7 +271,6 @@ test('state maps transport failures to a typed network error', async () => {
     const snapshot = state.getSnapshot();
     assert.equal(snapshot.error.code, 'network_error');
     assert.equal(snapshot.error.message, 'Network error');
-    assert.equal(snapshot.loading.overview, false);
     assert.equal(snapshot.config, null);
   } finally {
     mock.restore();
@@ -307,146 +278,201 @@ test('state maps transport failures to a typed network error', async () => {
   }
 });
 
-test('state maps host error envelopes and 401 login_expired clears auth', async () => {
+test('state maps host error envelopes and a 401 login_expired clears the login', async () => {
   const { state } = await freshState();
   const mock = installFetch({
-    'GET /grok-balance/api/status': statusPayload({ inference: inferenceStatus() }),
-    'GET /grok-balance/api/overview': hostError(401, 'login_expired', 'expired'),
+    'GET /grok-balance/api/status': statusPayload(),
+    'GET /grok-balance/api/overview': hostError(401, 'login_expired', 'no longer authorized'),
   });
   try {
     await state.bootstrap();
-    assert.equal(state.getSnapshot().inference.ref, 'ZAI_CODING_CN_API_KEY');
+    assert.equal(state.getSnapshot().loggedIn, true);
     await state.refreshOverview({ force: true });
     const snapshot = state.getSnapshot();
+    assert.equal(snapshot.loggedIn, false);
+    assert.equal(snapshot.loginExpired, true);
     assert.equal(snapshot.error.code, 'login_expired');
-    assert.equal(snapshot.auth.loggedIn, false);
-    assert.equal(snapshot.auth.loginExpired, true);
-    assert.equal(snapshot.auth.user.name, 'Tester');
-    assert.equal(snapshot.login.state, 'expired');
-    assert.equal(snapshot.inference, null, 'an expired login clears the credential block');
-    assert.equal(snapshot.loading.overview, false);
   } finally {
     mock.restore();
     state.dispose();
   }
 });
 
-test('state dedupes in-flight overview requests and records lastUpdated', async () => {
+test('state refreshOverview caches per TTL, records lastUpdated, and shares one flight', async () => {
   const { state } = await freshState();
-  const generatedAt = 1_700_000_123_000;
-  const overview = { generatedAt, auth: loggedInAuth, subscription: null, quota: null, remaining: null, reset: null, stale: false, error: null };
+  let overviews = 0;
   const mock = installFetch({
     'GET /grok-balance/api/status': statusPayload(),
-    'GET /grok-balance/api/overview?force=1': ok(overview),
+    'GET /grok-balance/api/overview': () => {
+      overviews += 1;
+      return overviewPayload();
+    },
   });
   try {
     await state.bootstrap();
-    const [first, second] = await Promise.all([
-      state.refreshOverview({ force: true }),
-      state.refreshOverview({ force: true }),
-    ]);
-    assert.equal(first, second);
-    assert.equal(mock.calls.filter((call) => call.path.endsWith('/overview')).length, 1);
-    assert.equal(state.getSnapshot().lastUpdated, generatedAt);
-    assert.equal(state.getSnapshot().overview.generatedAt, generatedAt);
-  } finally {
-    mock.restore();
-    state.dispose();
-  }
-});
-
-test('state surfaces overview host errors without dropping the payload', async () => {
-  const { state } = await freshState();
-  const overview = { generatedAt: Date.now(), auth: loggedInAuth, quota: null, stale: true, error: { code: 'upstream_failed', message: 'boom' } };
-  const mock = installFetch({
-    'GET /grok-balance/api/status': statusPayload(),
-    'GET /grok-balance/api/overview?force=1': ok(overview),
-  });
-  try {
-    await state.bootstrap();
+    const [first, second] = await Promise.all([state.refreshOverview(), state.refreshOverview()]);
+    assert.equal(first, second, 'in-flight requests share one promise');
+    const cached = await state.refreshOverview();
+    assert.equal(overviews, 1, 'the TTL window keeps the cached payload');
+    assert.equal(cached.billing.creditUsagePercent, 25);
+    assert.equal(state.getSnapshot().lastUpdated, 1_700_000_100_000);
     await state.refreshOverview({ force: true });
-    assert.equal(state.getSnapshot().error.code, 'upstream_failed');
-    assert.equal(state.getSnapshot().overview.stale, true);
+    assert.equal(overviews, 2, 'force bypasses the cache');
+    // Force requests carry the force query flag.
+    const forcedCall = mock.calls.find((call) => call.path === '/grok-balance/api/overview' && call.search === '?force=1');
+    assert.ok(forcedCall !== undefined, 'force refresh sends ?force=1');
   } finally {
     mock.restore();
     state.dispose();
   }
 });
 
-test('state loadUsage selects the range, sends the time zone, and caches per range', async () => {
+test('state treats a login_required overview as signed-out, not as an error', async () => {
   const { state } = await freshState();
-  const usage = { range: '7d', generatedAt: 1, summary: { totalTokens: 42 }, series: [], models: [], tools: [] };
   const mock = installFetch({
-    'GET /grok-balance/api/status': statusPayload(),
-    'GET /grok-balance/api/usage': ({ url }) => (url.searchParams.get('range') === '7d' ? ok(usage) : ok({ ...usage, range: url.searchParams.get('range') })),
+    'GET /grok-balance/api/status': statusPayload({ loggedIn: true, login: loginView }),
+    'GET /grok-balance/api/overview': ok({
+      error: { code: 'login_required', message: 'Sign in to Grok first' },
+      stale: false,
+      generatedAt: null,
+    }),
   });
   try {
     await state.bootstrap();
-    const loaded = await state.loadUsage('7d');
-    assert.equal(loaded.range, '7d');
-    assert.equal(state.getSnapshot().usageRange, '7d');
-    assert.equal(state.getSnapshot().usage.summary.totalTokens, 42);
-    const usageCall = mock.calls.find((call) => call.path.endsWith('/usage'));
-    assert.equal(usageCall.search.includes('range=7d'), true);
-    assert.equal(usageCall.search.includes('tz='), true);
-
-    await state.loadUsage('7d');
-    assert.equal(mock.calls.filter((call) => call.path.endsWith('/usage')).length, 1, 'fresh usage is cached');
-
-    await state.loadUsage('30d', { force: true });
-    assert.equal(mock.calls.filter((call) => call.path.endsWith('/usage')).length, 2);
-    assert.equal(state.getSnapshot().usageRange, '30d');
-
-    state.setUsageRange('today');
-    assert.equal(state.getSnapshot().usage, null, 'changing range invalidates the payload');
+    const payload = await state.refreshOverview({ force: true });
+    const snapshot = state.getSnapshot();
+    assert.equal(snapshot.loggedIn, false);
+    assert.equal(snapshot.error, null, 'login_required clears the login without raising an error');
+    assert.equal(payload.error.code, 'login_required');
   } finally {
     mock.restore();
     state.dispose();
   }
 });
 
-test('state loadReset caches, force reloads, and useReset reports success', async () => {
+test('state records per-surface overview errors without dropping the payload', async () => {
   const { state } = await freshState();
-  const resetBlock = { fiveHour: { available: [], latest: null }, week: { available: [], latest: null }, hasUnreadHistory: false };
   const mock = installFetch({
     'GET /grok-balance/api/status': statusPayload(),
-    'GET /grok-balance/api/reset': ok(resetBlock),
-    'GET /grok-balance/api/overview': ok({ generatedAt: Date.now(), auth: loggedInAuth, error: null }),
-    'POST /grok-balance/api/reset/use': ok({ used: true }),
+    'GET /grok-balance/api/overview': ok({
+      user: { userId: 'user-1', email: 'tester@grok.com', name: null, subscriptionTier: null },
+      billing: { error: { code: 'upstream_failed', message: 'billing is down' } },
+      topup: null,
+      stale: false,
+      generatedAt: 1_700_000_100_000,
+    }),
   });
   try {
     await state.bootstrap();
-    await state.loadReset();
-    await state.loadReset();
-    assert.equal(mock.calls.filter((call) => call.path.endsWith('/reset')).length, 1, 'fresh reset block is cached');
-    await state.loadReset({ force: true });
-    assert.equal(mock.calls.filter((call) => call.path.endsWith('/reset')).length, 2);
-    assert.deepEqual(state.getSnapshot().reset, resetBlock);
-
-    const result = await state.useReset('fiveHour');
-    assert.equal(result.ok, true);
-    const post = mock.calls.find((call) => call.method === 'POST' && call.path.endsWith('/reset/use'));
-    assert.ok(post !== undefined);
-    const body = JSON.parse(post.body);
-    assert.equal(body.resetType, 'fiveHour');
-    assert.equal(typeof body.idempotencyKey, 'string');
-    assert.ok(body.idempotencyKey.length > 8);
-
-    const invalid = await state.useReset('');
-    assert.equal(invalid.ok, false);
-    assert.equal(invalid.error.code, 'invalid_request');
+    const payload = await state.refreshOverview({ force: true });
+    assert.equal(payload.billing.error.code, 'upstream_failed');
+    assert.equal(state.getSnapshot().overview.billing.error.code, 'upstream_failed');
   } finally {
     mock.restore();
     state.dispose();
   }
 });
 
-test('state saveConfig and logout update the snapshot', async () => {
+test('state startLogin stores the device flow and pollLogin completes it', async () => {
+  const { state } = await freshState();
+  const polls = [];
+  const mock = installFetch({
+    'GET /grok-balance/api/status': statusPayload(),
+    'POST /grok-balance/api/login': flowStartPayload(),
+    'GET /grok-balance/api/login/poll': ({ url }) => {
+      polls.push(url.searchParams.get('flowId'));
+      return flowStartPayload({ status: 'complete' });
+    },
+    'GET /grok-balance/api/overview': overviewPayload(),
+  });
+  try {
+    await state.bootstrap();
+    const flow = await state.startLogin();
+    assert.equal(flow.state, 'pending');
+    assert.equal(flow.userCode, 'ABCD-1234');
+    assert.equal(flow.verificationUriComplete, 'https://auth.x.ai/device?code=ABCD-1234');
+    const settled = await state.pollLogin();
+    assert.deepEqual(polls, ['flow-1'], 'the poll carries the flowId query');
+    assert.equal(settled.state, 'idle', 'a completed flow settles back to idle');
+    const snapshot = state.getSnapshot();
+    assert.equal(snapshot.loggedIn, true);
+    assert.equal(snapshot.overview.billing.creditUsagePercent, 25);
+    assert.equal(snapshot.error, null);
+  } finally {
+    mock.restore();
+    state.dispose();
+  }
+});
+
+test('state maps a failed device flow onto the error state', async () => {
   const { state } = await freshState();
   const mock = installFetch({
-    'GET /grok-balance/api/status': statusPayload({ inference: inferenceStatus() }),
-    'POST /grok-balance/api/config': ({ init }) => ok({ ...baseConfig, ...JSON.parse(init.body) }),
-    'GET /grok-balance/api/overview?force=1': ok({ generatedAt: 1, auth: loggedInAuth, error: null }),
+    'GET /grok-balance/api/status': statusPayload(),
+    'POST /grok-balance/api/login': flowStartPayload(),
+    'GET /grok-balance/api/login/poll': flowStartPayload({ status: 'error', error: 'authorization denied' }),
+  });
+  try {
+    await state.bootstrap();
+    await state.startLogin();
+    const settled = await state.pollLogin();
+    assert.equal(settled.state, 'error');
+    assert.equal(settled.error, 'authorization denied');
+    assert.equal(state.getSnapshot().error.code, 'login_failed');
+  } finally {
+    mock.restore();
+    state.dispose();
+  }
+});
+
+test('state startLogin failures surface an error flow block', async () => {
+  const { state, setTranslate } = await freshState();
+  setTranslate(makeT('en'));
+  const mock = installFetch({
+    'GET /grok-balance/api/status': statusPayload(),
+    'POST /grok-balance/api/login': hostError(502, 'oauth_unavailable', 'issuer down'),
+  });
+  try {
+    await state.bootstrap();
+    await assert.rejects(() => state.startLogin(), (error) => error.code === 'oauth_unavailable');
+    const flow = state.getSnapshot().flow;
+    assert.equal(flow.state, 'error');
+    assert.equal(flow.error, 'issuer down');
+  } finally {
+    mock.restore();
+    state.dispose();
+  }
+});
+
+test('state cancelLogin clears the pending flow without touching login', async () => {
+  const { state } = await freshState();
+  const mock = installFetch({
+    'GET /grok-balance/api/status': statusPayload(),
+    'POST /grok-balance/api/login': flowStartPayload(),
+    'GET /grok-balance/api/login/poll': ok(flowStartPayload({ status: 'pending' })),
+  });
+  try {
+    await state.bootstrap();
+    await state.startLogin();
+    await state.pollLogin();
+    state.cancelLogin();
+    const snapshot = state.getSnapshot();
+    assert.equal(snapshot.flow.state, 'idle');
+    assert.equal(snapshot.flow.flowId, null);
+    assert.equal(snapshot.loggedIn, true, 'a local cancel keeps the stored login');
+    const again = await state.pollLogin();
+    assert.equal(again.state, 'idle', 'no further polls run after cancel');
+  } finally {
+    mock.restore();
+    state.dispose();
+  }
+});
+
+test('state saveConfig applies the returned config and logout clears account data', async () => {
+  const { state } = await freshState();
+  const mock = installFetch({
+    'GET /grok-balance/api/status': statusPayload(),
+    'GET /grok-balance/api/overview': overviewPayload(),
+    'POST /grok-balance/api/config': ok({ ...baseConfig, refreshMinutes: 5 }),
     'POST /grok-balance/api/logout': ok({ ok: true }),
   });
   try {
@@ -456,210 +482,44 @@ test('state saveConfig and logout update the snapshot', async () => {
     assert.equal(saved.config.refreshMinutes, 5);
     assert.equal(state.getSnapshot().config.refreshMinutes, 5);
 
-    const failed = await state.saveConfig(null);
-    assert.equal(failed.ok, false);
-    assert.equal(failed.error.code, 'invalid_request');
-
-    const signedOut = await state.logout();
-    assert.equal(signedOut.ok, true);
-    assert.equal(state.getSnapshot().auth.loggedIn, false);
-    assert.equal(state.getSnapshot().overview, null);
-    assert.equal(state.getSnapshot().inference, null);
-    assert.equal(state.getSnapshot().login.state, 'idle');
-  } finally {
-    mock.restore();
-    state.dispose();
-  }
-});
-
-test('state saveConfig applies the returned config and refreshes a signed-in overview', async () => {
-  const { state } = await freshState();
-  const mock = installFetch({
-    'GET /grok-balance/api/status': statusPayload(),
-    'POST /grok-balance/api/config': ({ init }) => ok({ ...baseConfig, ...JSON.parse(init.body) }),
-    'GET /grok-balance/api/overview?force=1': ok({ generatedAt: 1_700_000_000_123, auth: loggedInAuth, error: null }),
-  });
-  try {
-    await state.bootstrap();
-    const saved = await state.saveConfig({ family: 'zai' });
-    assert.equal(saved.ok, true);
-    assert.equal(saved.config.family, 'zai');
-    assert.equal(state.getSnapshot().config.family, 'zai', 'returned config lands in the snapshot');
-    await new Promise((resolve) => setTimeout(resolve, 10));
-    assert.equal(mock.calls.filter((call) => call.path.endsWith('/overview')).length, 1, 'a signed-in save refreshes the overview');
-    assert.equal(state.getSnapshot().overview.generatedAt, 1_700_000_000_123);
-  } finally {
-    mock.restore();
-    state.dispose();
-  }
-});
-
-test('state maps inference from every overview response and normalizes malformed fields', async () => {
-  const { state } = await freshState();
-  const overviews = [
-    ok({
-      generatedAt: 1_700_000_000_000,
-      auth: loggedInAuth,
-      inference: inferenceStatus({ ref: 'OVERVIEW_REF', family: 'zai', writtenAt: 11, expiresAt: 22, expiresInMs: 33 }),
-      error: null,
-    }),
-    ok({
-      generatedAt: 1_700_000_001_000,
-      auth: loggedInAuth,
-      inference: { enabled: 'yes', available: 1, ref: '', family: 7, writtenAt: 'x', expiresAt: Infinity, expiresInMs: null, error: { code: 'credential_write_failed', message: 'nope' } },
-      error: null,
-    }),
-    ok({ generatedAt: 1_700_000_002_000, auth: loggedInAuth, error: null }),
-  ];
-  const mock = installFetch({
-    'GET /grok-balance/api/status': statusPayload({ inference: inferenceStatus() }),
-    'GET /grok-balance/api/overview?force=1': () => overviews.shift(),
-  });
-  try {
-    await state.bootstrap();
-    await state.refreshOverview({ force: true });
-    assert.deepEqual(state.getSnapshot().inference, {
-      enabled: true,
-      available: true,
-      ref: 'OVERVIEW_REF',
-      family: 'zai',
-      writtenAt: 11,
-      expiresAt: 22,
-      expiresInMs: 33,
-      error: null,
-    }, 'overview replaces the status block');
-
-    await state.refreshOverview({ force: true });
-    assert.deepEqual(state.getSnapshot().inference, {
-      enabled: false,
-      available: false,
-      ref: null,
-      family: null,
-      writtenAt: null,
-      expiresAt: null,
-      expiresInMs: null,
-      error: 'credential_write_failed',
-    }, 'malformed fields normalize instead of leaking through');
-
-    await state.refreshOverview({ force: true });
-    assert.equal(state.getSnapshot().inference, null, 'an overview without inference clears it');
-  } finally {
-    mock.restore();
-    state.dispose();
-  }
-});
-
-test('state login ready refreshes inference from the post-login status and logout clears it', async () => {
-  const { state } = await freshState();
-  const statuses = [
-    statusPayload({ inference: inferenceStatus({ ref: 'BEFORE_LOGIN_REF' }) }),
-    statusPayload({ inference: inferenceStatus({ ref: 'POST_LOGIN_REF', writtenAt: 222 }) }),
-  ];
-  const mock = installFetch({
-    'GET /grok-balance/api/status': () => (statuses.length > 0 ? statuses.shift() : statusPayload()),
-    'POST /grok-balance/api/login': ok({ authorizeUrl: 'https://zcode.z.ai/authorize', pollIntervalMs: 1000 }),
-    'GET /grok-balance/api/login/poll': ok({ state: 'ready' }),
-    'GET /grok-balance/api/overview?force=1': hostError(502, 'upstream_failed', 'flaky'),
-    'POST /grok-balance/api/logout': ok({ ok: true }),
-  });
-  try {
-    await state.bootstrap();
-    assert.equal(state.getSnapshot().inference.ref, 'BEFORE_LOGIN_REF');
-    await state.startLogin();
-    await state.pollLogin();
-    assert.equal(state.getSnapshot().login.state, 'idle');
-    assert.equal(state.getSnapshot().inference.ref, 'POST_LOGIN_REF', 'login-ready status refreshes inference');
-    assert.equal(state.getSnapshot().inference.writtenAt, 222);
-
-    const signedOut = await state.logout();
-    assert.equal(signedOut.ok, true);
-    assert.equal(state.getSnapshot().inference, null, 'logout clears inference');
-  } finally {
-    mock.restore();
-    state.dispose();
-  }
-});
-
-test('state login flow starts, polls to ready, and refreshes status plus overview', async () => {
-  const { state } = await freshState();
-  const overview = { generatedAt: Date.now(), auth: loggedInAuth, error: null };
-  const mock = installFetch({
-    'GET /grok-balance/api/status': statusPayload(),
-    'POST /grok-balance/api/login': ok({ authorizeUrl: 'https://zcode.z.ai/authorize', expiresAt: Date.now() + 60_000, pollIntervalMs: 1000 }),
-    'GET /grok-balance/api/login/poll': ok({ state: 'ready', user: { name: 'Tester' } }),
-    'GET /grok-balance/api/overview?force=1': ok(overview),
-  });
-  try {
-    await state.bootstrap();
-    const authorizeUrl = await state.startLogin({ family: 'grok' });
-    assert.equal(authorizeUrl, 'https://zcode.z.ai/authorize');
-    assert.equal(state.getSnapshot().login.state, 'pending');
-    assert.equal(state.getSnapshot().login.authorizeUrl, 'https://zcode.z.ai/authorize');
-    const loginCall = mock.calls.find((call) => call.method === 'POST' && call.path.endsWith('/login'));
-    assert.deepEqual(JSON.parse(loginCall.body), { family: 'grok' });
-
-    await state.pollLogin();
+    const result = await state.logout();
+    assert.equal(result.ok, true);
     const snapshot = state.getSnapshot();
-    assert.equal(snapshot.login.state, 'idle', 'a consumed flow returns to idle');
-    assert.equal(snapshot.auth.loggedIn, true);
-    assert.equal(snapshot.overview.generatedAt, overview.generatedAt);
-    const pollCall = mock.calls.find((call) => call.path.endsWith('/login/poll'));
-    assert.ok(pollCall !== undefined);
+    assert.equal(snapshot.loggedIn, false);
+    assert.equal(snapshot.login, null);
+    assert.equal(snapshot.overview, null);
+    assert.equal(snapshot.lastUpdated, null);
   } finally {
     mock.restore();
     state.dispose();
   }
 });
 
-test('state login start failures surface a failed login block', async () => {
+test('state.tick refreshes stale overviews and skips hidden documents', async () => {
   const { state } = await freshState();
+  let overviews = 0;
   const mock = installFetch({
     'GET /grok-balance/api/status': statusPayload(),
-    'POST /grok-balance/api/login': hostError(502, 'oauth_unavailable', 'unavailable'),
+    'GET /grok-balance/api/overview': () => {
+      overviews += 1;
+      return overviewPayload();
+    },
   });
   try {
     await state.bootstrap();
-    await assert.rejects(() => state.startLogin(), (error) => error.code === 'oauth_unavailable');
-    assert.equal(state.getSnapshot().login.state, 'failed');
-    assert.equal(state.getSnapshot().error.code, 'oauth_unavailable');
-  } finally {
-    mock.restore();
-    state.dispose();
-  }
-});
-
-test('state cancelLogin clears the pending flow without touching auth', async () => {
-  const { state } = await freshState();
-  const mock = installFetch({
-    'GET /grok-balance/api/status': statusPayload(),
-    'POST /grok-balance/api/login': ok({ authorizeUrl: 'https://zcode.z.ai/authorize', pollIntervalMs: 1000 }),
-  });
-  try {
-    await state.bootstrap();
-    await state.startLogin();
-    state.cancelLogin();
-    assert.equal(state.getSnapshot().login.state, 'idle');
-    assert.equal(state.getSnapshot().auth.loggedIn, true);
-  } finally {
-    mock.restore();
-    state.dispose();
-  }
-});
-
-test('state.tick pauses in hidden documents and bootstraps a cold store', async () => {
-  const { state } = await freshState();
-  const mock = installFetch({ 'GET /grok-balance/api/status': statusPayload() });
-  const hadDocument = 'document' in globalThis;
-  const originalDocument = globalThis.document;
-  try {
-    await state.bootstrap();
-    assert.equal(mock.calls.length, 1);
-    globalThis.document = { visibilityState: 'hidden' };
     await state.tick();
-    assert.equal(mock.calls.length, 1, 'hidden documents skip auto-refresh');
+    assert.equal(overviews, 1, 'a cold overview refreshes on tick');
+    // Hide the document: ticks pause.
+    const originalHidden = Object.getOwnPropertyDescriptor(globalThis, 'document');
+    globalThis.document = { visibilityState: 'hidden' };
+    try {
+      await state.tick();
+    } finally {
+      if (originalHidden === undefined) delete globalThis.document;
+      else Object.defineProperty(globalThis, 'document', originalHidden);
+    }
+    assert.equal(overviews, 1, 'hidden documents pause auto-refresh');
   } finally {
-    if (hadDocument) globalThis.document = originalDocument;
-    else delete globalThis.document;
     mock.restore();
     state.dispose();
   }

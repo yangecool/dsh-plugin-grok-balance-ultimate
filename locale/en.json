@@ -1,6 +1,6 @@
 {
   "meta": {
-    "title": "Grok coding plan",
-    "description": "Signs in to Grok with OAuth, shows the remaining Coding Plan quota in a composer popover, and opens a dedicated usage statistics page."
+    "title": "Grok account & usage",
+    "description": "Signs in to Grok with a device-code flow, shows the remaining subscription credit in a composer popover, and opens a dedicated account usage page."
   }
 }

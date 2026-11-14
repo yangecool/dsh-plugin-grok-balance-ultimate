@@ -1,13 +1,22 @@
 /**
- * Singleton client store for the Grok Coding Plan plugin.
+ * Singleton client store for the Grok account plugin.
  *
- * Owns every same-origin request to the plugin's Host routes, the OAuth login
- * polling loop, cached overview/usage/reset payloads, and the single error
+ * Owns every same-origin request to the plugin's Host routes, the device-code
+ * login polling loop, the cached overview payload, and the single error
  * surface components read. The snapshot is immutable between changes so
  * `useSyncExternalStore` can compare references; `subscribe` returns the
  * disposer React calls on unmount and `dispose()` tears down timers, requests,
  * and listeners when the plugin unloads. No React import, no top-level DOM
  * access: this module is importable from a plain Node process.
+ *
+ * Host contract (prefix `/grok-balance/api`, success `{ data }`, failure
+ * non-2xx `{ error: { code, message } }`):
+ * - `GET  /status`        → `{ config, loggedIn, login, pending }`
+ * - `POST /login`         → device flow `{ flowId, status, userCode, verificationUri, …, expiresAt }`
+ * - `GET  /login/poll?flowId=` → flow status (`pending` | `complete` | `error`)
+ * - `POST /logout`        → `{ ok: true }`
+ * - `POST /config`        → the sanitized config
+ * - `GET  /overview?force=1` → `{ user, billing, topup, stale, generatedAt }` or `{ error, … }`
  */
 import { coreDicts, interpolate } from './dicts-core.js';
 
@@ -15,8 +24,6 @@ const ROUTE_PREFIX = '/grok-balance';
 const API_BASE = `${ROUTE_PREFIX}/api`;
 const DEFAULT_REFRESH_MINUTES = 30;
 const OVERVIEW_TTL_MS = 30_000;
-const USAGE_TTL_MS = 120_000;
-const RESET_TTL_MS = 60_000;
 const REQUEST_TIMEOUT_MS = 20_000;
 const LOGIN_TIMEOUT_MS = 25_000;
 const POLL_TIMEOUT_MS = 15_000;
@@ -24,10 +31,18 @@ const STATUS_TIMEOUT_MS = 15_000;
 const DEFAULT_POLL_INTERVAL_MS = 3_000;
 const MIN_POLL_INTERVAL_MS = 1_000;
 const MAX_POLL_INTERVAL_MS = 15_000;
-const USAGE_RANGES = Object.freeze(['today', '7d', '30d']);
-const LOGIN_STATES = new Set(['idle', 'starting', 'pending', 'ready', 'failed', 'expired']);
-const EMPTY_LOGIN = Object.freeze({ state: 'idle', authorizeUrl: null, error: null });
-const EMPTY_LOADING = Object.freeze({ overview: false, usage: false, reset: false, login: false });
+/** Login flow states the client tracks; `complete` is a transient success flash. */
+const FLOW_STATES = new Set(['idle', 'starting', 'pending', 'complete', 'error']);
+const EMPTY_FLOW = Object.freeze({
+  state: 'idle',
+  flowId: null,
+  userCode: null,
+  verificationUri: null,
+  verificationUriComplete: null,
+  expiresAt: null,
+  error: null,
+});
+const EMPTY_LOADING = Object.freeze({ overview: false, login: false, config: false });
 
 /** Typed store failure; Host error codes pass through unchanged. */
 class ClientError extends Error {
@@ -39,17 +54,18 @@ class ClientError extends Error {
   }
 }
 
-/** Snapshot shape: config/auth/overview/usage/range/reset/inference/login/loading/error/lastUpdated. */
+/**
+ * Snapshot shape:
+ * `config / loggedIn / loginExpired / login / overview / flow / loading / error / lastUpdated`.
+ */
 function initialSnapshot() {
   return {
     config: null,
-    auth: null,
+    loggedIn: false,
+    loginExpired: false,
+    login: null,
     overview: null,
-    usage: null,
-    usageRange: 'today',
-    reset: null,
-    inference: null,
-    login: { ...EMPTY_LOGIN },
+    flow: { ...EMPTY_FLOW },
     loading: { ...EMPTY_LOADING },
     error: null,
     lastUpdated: null,
@@ -87,9 +103,9 @@ function setLoading(scope, value) {
   set({ loading: { ...snapshot.loading, [scope]: value === true } });
 }
 
-/** Merge a login progress patch. */
-function setLogin(patch) {
-  set({ login: { ...snapshot.login, ...patch } });
+/** Merge a device-flow progress patch. */
+function setFlow(patch) {
+  set({ flow: { ...snapshot.flow, ...patch } });
 }
 
 /**
@@ -125,84 +141,48 @@ function clearScopeError(scope) {
   if (snapshot.error !== null) set({ error: null });
 }
 
-/** Force the logged-out/expired auth state; cached payloads stay for display. */
-function applyExpiredAuth() {
-  stopLoginPolling();
-  const previous = snapshot.auth;
-  set({
-    auth: {
-      loggedIn: false,
-      loginExpired: true,
-      user: previous?.user ?? null,
-      account: previous?.account ?? null,
-      family: previous?.family ?? snapshot.config?.family ?? null,
-    },
-    inference: null,
-    login: { state: 'expired', authorizeUrl: null, error: translate('auth.loginExpiredBody') },
-  });
-  setLoading('login', false);
+/** Epoch milliseconds of an ISO/epoch value, else null. */
+function toMs(value) {
+  if (typeof value === 'number' && Number.isFinite(value) && value > 0) {
+    return value < 1e12 ? value * 1000 : value;
+  }
+  if (typeof value === 'string' && value.trim() !== '') {
+    const parsed = Date.parse(value);
+    if (Number.isFinite(parsed)) return parsed;
+  }
+  return null;
 }
 
-/** Record a failure for one scope; a `login_expired` code clears the auth state. */
-function recordError(scope, error) {
-  const normalized = normalizeError(error);
-  errorScope = scope;
-  if (normalized.code === 'login_expired') applyExpiredAuth();
-  set({ error: normalized });
-  return normalized;
-}
-
-/** Read a finite number; null otherwise. */
-function finiteNumber(value) {
-  return typeof value === 'number' && Number.isFinite(value) ? value : null;
-}
-
-/**
- * Map a Host inference payload to the snapshot inference block.
- * Keeps credential metadata only (never a token) and tolerates a Host that
- * reports its error as `{ code, message }` instead of a code string.
- * @param inference - the `inference` object from `/api/status` or `/api/overview`.
- * @returns the normalized block, or null when the Host publishes none.
- */
-function inferenceFromPayload(inference) {
-  if (inference === null || typeof inference !== 'object' || Array.isArray(inference)) return null;
-  const rawError = inference.error;
-  const error = typeof rawError === 'string' && rawError !== ''
-    ? rawError
-    : rawError !== null && typeof rawError === 'object' && typeof rawError.code === 'string' && rawError.code !== ''
-      ? rawError.code
-      : null;
+/** Map the `/api/status` login block to the snapshot fields. */
+function loginFromStatus(login) {
+  if (login === null || typeof login !== 'object') return null;
   return {
-    enabled: inference.enabled === true,
-    available: inference.available === true,
-    ref: typeof inference.ref === 'string' && inference.ref !== '' ? inference.ref : null,
-    family: typeof inference.family === 'string' && inference.family !== '' ? inference.family : null,
-    writtenAt: finiteNumber(inference.writtenAt),
-    expiresAt: finiteNumber(inference.expiresAt),
-    expiresInMs: finiteNumber(inference.expiresInMs),
-    error,
+    email: typeof login.email === 'string' && login.email !== '' ? login.email : null,
+    userId: typeof login.userId === 'string' && login.userId !== '' ? login.userId : null,
+    expiresAt: toMs(login.expiresAt),
+    loggedInAt: toMs(login.loggedInAt),
   };
 }
 
-/** Map a Host auth payload to the snapshot auth fields. */
-function authFromPayload(auth) {
-  if (auth === null || typeof auth !== 'object') return null;
+/** Map a device-flow payload (start reply or poll reply) to snapshot flow fields. */
+function flowFromPayload(data) {
+  if (data === null || typeof data !== 'object') return { state: 'idle' };
+  const state = FLOW_STATES.has(data.status) && data.status !== 'complete'
+    ? data.status
+    : data.status === 'complete' ? 'complete' : 'idle';
   return {
-    loggedIn: auth.loggedIn === true,
-    loginExpired: auth.loginExpired === true,
-    user: auth.user ?? null,
-    account: auth.account ?? null,
-    family: typeof auth.family === 'string' && auth.family !== '' ? auth.family : null,
-  };
-}
-
-/** Map a Host login payload to the snapshot login block. */
-function loginFromPayload(login) {
-  if (login === null || typeof login !== 'object') return { ...EMPTY_LOGIN };
-  return {
-    state: LOGIN_STATES.has(login.state) ? login.state : 'idle',
-    authorizeUrl: typeof login.authorizeUrl === 'string' && login.authorizeUrl !== '' ? login.authorizeUrl : null,
-    error: typeof login.error === 'string' && login.error !== '' ? login.error : null,
+    state,
+    flowId: typeof data.flowId === 'string' && data.flowId !== '' ? data.flowId : null,
+    userCode: typeof data.userCode === 'string' && data.userCode !== '' ? data.userCode : null,
+    verificationUri: typeof data.verificationUri === 'string' && data.verificationUri !== ''
+      ? data.verificationUri
+      : null,
+    verificationUriComplete: typeof data.verificationUriComplete === 'string'
+      && data.verificationUriComplete !== ''
+      ? data.verificationUriComplete
+      : null,
+    expiresAt: toMs(data.expiresAt),
+    error: typeof data.error === 'string' && data.error !== '' ? data.error : null,
   };
 }
 
@@ -210,16 +190,6 @@ function loginFromPayload(login) {
 function routeUrl(path, query) {
   const search = query === undefined ? '' : new URLSearchParams(query).toString();
   return `${API_BASE}${path}${search === '' ? '' : `?${search}`}`;
-}
-
-/** Browser time zone for the usage query, or UTC outside a browser. */
-function timeZone() {
-  try {
-    const zone = Intl.DateTimeFormat().resolvedOptions().timeZone;
-    return typeof zone === 'string' && zone !== '' ? zone : 'UTC';
-  } catch {
-    return 'UTC';
-  }
 }
 
 /**
@@ -289,7 +259,41 @@ function ensureBootstrap() {
   void bootstrap();
 }
 
-/** Normalize the upstream poll interval into a safe timer delay. */
+/** Apply one `/api/status` payload to the snapshot. */
+function applyStatus(data) {
+  const config = data?.config !== null && typeof data?.config === 'object' ? data.config : null;
+  const login = loginFromStatus(data?.login);
+  const loggedIn = data?.loggedIn === true;
+  set({
+    config,
+    loggedIn,
+    // A working login clears a stale expired marker; a signed-out status
+    // keeps it so the login card still explains why the session ended.
+    loginExpired: loggedIn === true ? false : snapshot.loginExpired,
+    login,
+  });
+  bootstrapped = true;
+}
+
+/** Force the logged-out/expired login state; cached payloads stay for display. */
+function applyExpiredAuth() {
+  stopLoginPolling();
+  set({
+    loggedIn: false,
+    loginExpired: true,
+  });
+}
+
+/** Record a failure for one scope; a `login_expired` code clears the login state. */
+function recordError(scope, error) {
+  const normalized = normalizeError(error);
+  errorScope = scope;
+  if (normalized.code === 'login_expired') applyExpiredAuth();
+  set({ error: normalized });
+  return normalized;
+}
+
+/** Normalize the login poll interval into a safe timer delay. */
 function normalizePollInterval(value) {
   const numeric = Number(value);
   if (!Number.isFinite(numeric) || numeric <= 0) return DEFAULT_POLL_INTERVAL_MS;
@@ -300,10 +304,16 @@ function normalizePollInterval(value) {
 function scheduleLoginPoll() {
   stopLoginPolling();
   if (disposed) return;
+  const { expiresAt } = snapshot.flow;
+  const delay = expiresAt !== null ? Math.min(pollIntervalMs, Math.max(0, expiresAt - Date.now())) : pollIntervalMs;
+  if (delay <= 0) {
+    expireFlow();
+    return;
+  }
   pollTimer = setTimeout(() => {
     pollTimer = null;
     void pollLogin();
-  }, pollIntervalMs);
+  }, delay);
   if (typeof pollTimer?.unref === 'function') pollTimer.unref();
 }
 
@@ -314,11 +324,11 @@ function stopLoginPolling() {
   pollTimer = null;
 }
 
-/** Stable idempotency key for the reset-consumption route. */
-function createIdempotencyKey() {
-  const cryptoApi = globalThis.crypto;
-  if (cryptoApi !== undefined && typeof cryptoApi.randomUUID === 'function') return cryptoApi.randomUUID();
-  return `grk-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
+/** Mark the pending flow as errored once its device code has expired. */
+function expireFlow() {
+  if (snapshot.flow.state !== 'pending') return;
+  stopLoginPolling();
+  setFlow({ state: 'error', error: translate('auth.loginCodeExpired') });
 }
 
 /** Whether the current document is hidden (`tick` pauses auto-refresh then). */
@@ -342,17 +352,8 @@ export function bootstrap() {
   return runOnce('bootstrap', async () => {
     try {
       const data = await request('/status', { timeoutMs: STATUS_TIMEOUT_MS });
-      const config = data?.config !== null && typeof data?.config === 'object' ? data.config : null;
-      const login = loginFromPayload(data?.login);
-      bootstrapped = true;
-      set({
-        config,
-        auth: authFromPayload(data?.auth),
-        inference: inferenceFromPayload(data?.inference),
-        login,
-      });
+      applyStatus(data);
       clearScopeError('bootstrap');
-      if (login.state === 'pending') scheduleLoginPoll();
     } catch (error) {
       recordError('bootstrap', error);
     }
@@ -361,8 +362,8 @@ export function bootstrap() {
 }
 
 /**
- * Refresh the aggregated overview.
- * @param options - `force` bypasses the 30 s freshness window.
+ * Refresh the aggregated account overview.
+ * @param options - `force` bypasses the freshness window.
  * @returns the overview payload, or null on failure.
  */
 export function refreshOverview(options) {
@@ -377,21 +378,21 @@ export function refreshOverview(options) {
     try {
       const data = await request('/overview', { query: force ? { force: '1' } : undefined });
       if (data === null || typeof data !== 'object') return null;
-      const auth = authFromPayload(data.auth);
-      const changes = {
+      set({
         overview: data,
-        inference: inferenceFromPayload(data.inference),
-        lastUpdated: Number.isFinite(data.generatedAt) ? data.generatedAt : Date.now(),
-      };
-      if (auth !== null) changes.auth = auth;
-      set(changes);
-      if (auth !== null && auth.loginExpired) applyExpiredAuth();
+        lastUpdated: toMs(data.generatedAt) ?? Date.now(),
+      });
       const hostError = data.error;
       if (hostError !== null && typeof hostError === 'object') {
-        recordError('overview', new ClientError(
-          typeof hostError.code === 'string' && hostError.code !== '' ? hostError.code : 'upstream_failed',
-          typeof hostError.message === 'string' ? hostError.message : '',
-        ));
+        if (hostError.code === 'login_required') {
+          set({ loggedIn: false });
+          clearScopeError('overview');
+        } else {
+          recordError('overview', new ClientError(
+            typeof hostError.code === 'string' && hostError.code !== '' ? hostError.code : 'upstream_failed',
+            typeof hostError.message === 'string' ? hostError.message : '',
+          ));
+        }
       } else {
         clearScopeError('overview');
       }
@@ -406,124 +407,43 @@ export function refreshOverview(options) {
   });
 }
 
-/**
- * Load usage statistics for one range.
- * @param range - `'today'` | `'7d'` | `'30d'`; omitted keeps the current range.
- * @param options - `force` bypasses the 2 min freshness window.
- * @returns the usage payload, or null on failure.
- */
-export function loadUsage(range, options) {
-  ensureBootstrap();
-  const selected = USAGE_RANGES.includes(range) ? range : snapshot.usageRange;
-  if (selected !== snapshot.usageRange) set({ usageRange: selected, usage: null });
-  const force = options?.force === true;
-  const cached = snapshot.usage;
-  if (!force && cached !== null && cached.range === selected && Date.now() - (lastAttempt.get('usage') ?? 0) < USAGE_TTL_MS) {
-    return Promise.resolve(cached);
+/** Re-read `/api/status` after a state-changing action; errors stay quiet. */
+async function refreshStatusQuiet() {
+  try {
+    const data = await request('/status', { timeoutMs: STATUS_TIMEOUT_MS });
+    applyStatus(data);
+  } catch {
+    // A failed status refresh never undoes a completed device flow.
   }
-  return runOnce(`usage:${selected}`, async () => {
-    setLoading('usage', true);
-    try {
-      const query = { range: selected, tz: timeZone(), ...(force ? { force: '1' } : {}) };
-      const data = await request('/usage', { query });
-      if (data === null || typeof data !== 'object') return null;
-      if (snapshot.usageRange === selected) set({ usage: data });
-      clearScopeError('usage');
-      return data;
-    } catch (error) {
-      recordError('usage', error);
-      return null;
-    } finally {
-      lastAttempt.set('usage', Date.now());
-      setLoading('usage', false);
-    }
-  });
 }
 
 /**
- * Load the reset-chances block.
- * @param options - `force` bypasses the 1 min freshness window.
- * @returns the reset payload, or null on failure.
+ * Start the Grok device-code login flow and begin polling.
+ * @returns the flow view (`{ userCode, verificationUri, … }`) for the caller
+ *   to render and open.
+ * @throws {ClientError} with the normalized code/message on failure (the flow
+ *   block also records it).
  */
-export function loadReset(options) {
-  ensureBootstrap();
-  const force = options?.force === true;
-  if (!force && snapshot.reset !== null && Date.now() - (lastAttempt.get('reset') ?? 0) < RESET_TTL_MS) {
-    return Promise.resolve(snapshot.reset);
-  }
-  return runOnce('reset', async () => {
-    setLoading('reset', true);
-    try {
-      const data = await request('/reset', { query: force ? { force: '1' } : undefined });
-      if (data === null || typeof data !== 'object') return null;
-      set({ reset: data });
-      clearScopeError('reset');
-      return data;
-    } catch (error) {
-      recordError('reset', error);
-      return null;
-    } finally {
-      lastAttempt.set('reset', Date.now());
-      setLoading('reset', false);
-    }
-  });
-}
-
-/**
- * Consume one reset chance, then refresh reset and overview in the background.
- * @param resetType - reset kind accepted by the Host (`'fiveHour'` | `'week'`).
- * @returns `{ ok: true }` or `{ ok: false, error }`; never rejects.
- */
-export function useReset(resetType) {
-  if (typeof resetType !== 'string' || resetType === '') {
-    return Promise.resolve({ ok: false, error: { code: 'invalid_request', message: translate('state.error') } });
-  }
-  return runOnce(`reset-use:${resetType}`, async () => {
-    try {
-      await request('/reset/use', {
-        method: 'POST',
-        body: { resetType, idempotencyKey: createIdempotencyKey() },
-      });
-      clearScopeError('reset');
-      void loadReset({ force: true });
-      void refreshOverview({ force: true });
-      return { ok: true };
-    } catch (error) {
-      return { ok: false, error: recordError('reset', error) };
-    }
-  });
-}
-
-/**
- * Start an OAuth login flow and begin polling.
- * @param options - optional `family` (`'grok'` | `'zai'`); the Host config applies otherwise.
- * @returns the upstream authorize URL the page opens in a browser tab.
- * @throws {ClientError} with the normalized code/message on failure (the login block also records it).
- */
-export function startLogin(options) {
-  const family = typeof options?.family === 'string' && options.family !== '' ? options.family : undefined;
-  setLogin({ state: 'starting', authorizeUrl: null, error: null });
+export function startLogin() {
+  setFlow({ state: 'starting', error: null });
   setLoading('login', true);
   errorScope = null;
   if (snapshot.error !== null) set({ error: null });
   return runOnce('login-start', async () => {
     try {
-      const data = await request('/login', {
-        method: 'POST',
-        body: family === undefined ? {} : { family },
-        timeoutMs: LOGIN_TIMEOUT_MS,
-      });
-      const authorizeUrl = typeof data?.authorizeUrl === 'string' ? data.authorizeUrl : '';
-      if (authorizeUrl === '') throw new ClientError('oauth_invalid_response', translate('auth.loginFailed'));
-      pollIntervalMs = normalizePollInterval(data?.pollIntervalMs);
-      setLogin({ state: 'pending', authorizeUrl, error: null });
+      const data = await request('/login', { method: 'POST', body: {}, timeoutMs: LOGIN_TIMEOUT_MS });
+      const flow = flowFromPayload(data);
+      if (flow.state !== 'pending' || flow.userCode === null || flow.verificationUri === null) {
+        throw new ClientError('oauth_invalid_response', translate('auth.loginFailed'));
+      }
+      setFlow({ ...flow, error: null });
       scheduleLoginPoll();
       clearScopeError('login');
-      return authorizeUrl;
+      return snapshot.flow;
     } catch (error) {
       const normalized = error instanceof ClientError ? error : new ClientError('network_error', translate('auth.loginFailed'));
       recordError('login', normalized);
-      setLogin({ state: 'failed', authorizeUrl: null, error: normalized.message });
+      setFlow({ state: 'error', error: normalized.message });
       throw normalized;
     } finally {
       setLoading('login', false);
@@ -534,83 +454,58 @@ export function startLogin(options) {
 /** Stop local login polling and clear the pending login block. */
 export function cancelLogin() {
   stopLoginPolling();
-  setLogin({ state: 'idle', authorizeUrl: null, error: null });
+  setFlow({ ...EMPTY_FLOW });
   setLoading('login', false);
 }
 
-/** Poll the Host login flow once; the loop reschedules itself while pending. */
+/**
+ * Poll the Host login flow once; the loop reschedules itself while pending.
+ * @returns the snapshot flow block after the attempt.
+ */
 export async function pollLogin() {
-  const currentState = snapshot.login.state;
-  if (currentState !== 'pending' && currentState !== 'starting') return snapshot.login;
+  if (snapshot.flow.state !== 'pending' && snapshot.flow.state !== 'starting') return snapshot.flow;
   return runOnce('login-poll', pollLoginOnce);
 }
 
-/** One poll response, mapped onto the login block. */
+/** One poll response, mapped onto the flow block. */
 async function pollLoginOnce() {
+  const { flowId, expiresAt } = snapshot.flow;
+  if (expiresAt !== null && Date.now() >= expiresAt) {
+    expireFlow();
+    return snapshot.flow;
+  }
   let data;
   try {
-    data = await request('/login/poll', { timeoutMs: POLL_TIMEOUT_MS });
+    data = await request('/login/poll', {
+      query: flowId === null ? undefined : { flowId },
+      timeoutMs: POLL_TIMEOUT_MS,
+    });
   } catch {
     // Transport hiccups keep the flow alive; the next scheduled poll retries.
     scheduleLoginPoll();
-    return snapshot.login;
+    return snapshot.flow;
   }
-  const state = typeof data?.state === 'string' ? data.state : 'pending';
+  const state = typeof data?.status === 'string' ? data.status : 'pending';
   if (state === 'pending') {
     scheduleLoginPoll();
-    return snapshot.login;
+    return snapshot.flow;
   }
   stopLoginPolling();
-  switch (state) {
-    case 'ready': {
-      setLogin({ state: 'ready', authorizeUrl: null, error: null });
-      await afterLoginReady();
-      return snapshot.login;
-    }
-    case 'failed': {
-      const message = typeof data?.error === 'string' && data.error !== '' ? data.error : translate('auth.loginFailed');
-      setLogin({ state: 'failed', authorizeUrl: null, error: message });
-      recordError('login', new ClientError('login_failed', message));
-      return snapshot.login;
-    }
-    case 'expired': {
-      setLogin({ state: 'expired', authorizeUrl: null, error: translate('auth.loginExpiredBody') });
-      setLoading('login', false);
-      return snapshot.login;
-    }
-    case 'idle':
-    default: {
-      setLogin({ state: 'idle', authorizeUrl: null, error: null });
-      setLoading('login', false);
-      return snapshot.login;
-    }
+  if (state === 'complete') {
+    setFlow({ state: 'complete', error: null });
+    setLoading('login', false);
+    await refreshStatusQuiet();
+    await refreshOverview({ force: true });
+    setFlow({ ...EMPTY_FLOW });
+    return snapshot.flow;
   }
-}
-
-/** After a successful login: refresh status and overview once. */
-async function afterLoginReady() {
+  const message = typeof data?.error === 'string' && data.error !== ''
+    ? data.error
+    : translate('auth.loginFailed');
+  setFlow({ state: 'error', error: message });
+  recordError('login', new ClientError('login_failed', message));
   setLoading('login', false);
-  stopLoginPolling();
-  try {
-    const data = await request('/status', { timeoutMs: STATUS_TIMEOUT_MS });
-    if (data !== null && typeof data === 'object') {
-      const login = loginFromPayload(data.login);
-      const changes = {
-        inference: inferenceFromPayload(data.inference),
-        login: login.state === 'ready' ? { ...login, state: 'idle' } : login,
-      };
-      if (data.config !== null && typeof data.config === 'object') changes.config = data.config;
-      const auth = authFromPayload(data.auth);
-      if (auth !== null) changes.auth = auth;
-      bootstrapped = true;
-      set(changes);
-      clearScopeError('login');
-    }
-  } catch {
-    // A completed OAuth flow is not undone by a failed status refresh; the
-    // overview refresh below reports the failure through the shared error.
-  }
-  await refreshOverview({ force: true });
+  return snapshot.flow;
 }
 
 /**
@@ -626,12 +521,11 @@ export function logout() {
       return { ok: false, error: recordError('auth', error) };
     }
     set({
-      auth: { loggedIn: false, loginExpired: false, user: null, account: null, family: snapshot.config?.family ?? null },
+      loggedIn: false,
+      loginExpired: false,
+      login: null,
       overview: null,
-      usage: null,
-      reset: null,
-      inference: null,
-      login: { ...EMPTY_LOGIN },
+      flow: { ...EMPTY_FLOW },
       lastUpdated: null,
     });
     lastAttempt.clear();
@@ -644,7 +538,7 @@ export function logout() {
 /**
  * Persist a partial config patch and apply the sanitized config immediately.
  * A signed-in store refreshes the overview in the background afterward, so a
- * family or refresh-interval change is reflected without a reload.
+ * refresh-interval change is reflected without a reload.
  * @param patch - subset of the plugin config.
  * @returns `{ ok: true, config }` or `{ ok: false, error }`; never rejects.
  */
@@ -653,29 +547,20 @@ export function saveConfig(patch) {
     return Promise.resolve({ ok: false, error: { code: 'invalid_request', message: translate('state.error') } });
   }
   return runOnce('config-save', async () => {
+    setLoading('config', true);
     try {
       const data = await request('/config', { method: 'POST', body: patch });
       const config = data !== null && typeof data === 'object' ? data : null;
       if (config !== null) set({ config });
       clearScopeError('config');
-      const loggedIn = snapshot.auth !== null && snapshot.auth.loggedIn === true;
-      if (loggedIn) void refreshOverview({ force: true });
+      if (snapshot.loggedIn === true) void refreshOverview({ force: true });
       return { ok: true, config };
     } catch (error) {
       return { ok: false, error: recordError('config', error) };
+    } finally {
+      setLoading('config', false);
     }
   });
-}
-
-/**
- * Select the usage range. Does not fetch; call `loadUsage(range)` for data.
- * @param range - `'today'` | `'7d'` | `'30d'`.
- * @returns the active range after the call.
- */
-export function setUsageRange(range) {
-  if (!USAGE_RANGES.includes(range)) return snapshot.usageRange;
-  if (range !== snapshot.usageRange) set({ usageRange: range, usage: null });
-  return range;
 }
 
 /** Clear the shared error notice. */
@@ -694,14 +579,11 @@ export function tick() {
   if (disposed || isHidden()) return Promise.resolve();
   if (!bootstrapped) return bootstrap().then(() => undefined);
   const tasks = [];
-  if (snapshot.login.state === 'pending') tasks.push(pollLogin());
-  const loggedIn = snapshot.auth !== null && snapshot.auth.loggedIn === true;
-  if (snapshot.config !== null) {
-    const interval = refreshIntervalMs();
-    const stale = (key) => Date.now() - (lastAttempt.get(key) ?? 0) >= interval;
-    if (loggedIn && stale('overview')) tasks.push(refreshOverview());
-    if (loggedIn && snapshot.usage !== null && stale('usage')) tasks.push(loadUsage(snapshot.usageRange));
-    if (loggedIn && snapshot.reset !== null && stale('reset')) tasks.push(loadReset());
+  if (snapshot.flow.state === 'pending') tasks.push(pollLogin());
+  if (snapshot.loggedIn === true && snapshot.config !== null) {
+    if (Date.now() - (lastAttempt.get('overview') ?? 0) >= refreshIntervalMs()) {
+      tasks.push(refreshOverview());
+    }
   }
   return tasks.length === 0 ? Promise.resolve() : Promise.all(tasks).then(() => undefined);
 }
@@ -745,15 +627,11 @@ export const state = Object.freeze({
   getSnapshot,
   bootstrap,
   refreshOverview,
-  loadUsage,
-  loadReset,
-  useReset,
   startLogin,
   pollLogin,
   cancelLogin,
   logout,
   saveConfig,
-  setUsageRange,
   tick,
   dismissError,
   translate,

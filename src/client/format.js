@@ -40,7 +40,7 @@ function dictionaryLocale(locale) {
 /** Cached Intl.NumberFormat factory; the option key bounds the cache. */
 function numberFormat(locale, options) {
   const tag = localeTag(locale);
-  const key = `${tag}:${options.notation ?? 'standard'}:${options.maximumFractionDigits ?? 0}`;
+  const key = `${tag}:${options.notation ?? 'standard'}:${options.minimumFractionDigits ?? 0}:${options.maximumFractionDigits ?? 0}`;
   let format = numberFormats.get(key);
   if (format === undefined) {
     format = new Intl.NumberFormat(tag, options);
@@ -116,21 +116,6 @@ export function formatPercent(value, localeOrDefault = 'en', digitsOrLocale = 0)
 }
 
 /**
- * Remaining percentage of a quota limit.
- * The upstream `percentage` field is the USED ratio, so it is inverted here.
- * @param limit - quota limit from the overview (`percentage` is used ratio).
- * @returns remaining percentage in 0..100; 0 when no usable field exists.
- */
-export function remainingPercent(limit) {
-  if (limit === null || typeof limit !== 'object') return 0;
-  const usedPercentage = finiteNumber(limit.percentage);
-  if (usedPercentage !== null) return clamp(100 - usedPercentage, 0, 100);
-  const total = limitTotal(limit);
-  if (total > 0) return clamp((remainingOf(limit) / total) * 100, 0, 100);
-  return 0;
-}
-
-/**
  * Format an integer count with locale grouping.
  * @param value - number; non-finite values render as ''.
  * @param locale - locale id/tag.
@@ -155,17 +140,16 @@ export function formatCompact(value, locale = 'en') {
 }
 
 /**
- * Format a credit amount with up to two fraction digits.
- * @param value - credit amount; non-finite values render as ''.
+ * Format a USD amount with the `$` sign and exactly two fraction digits.
+ * @param value - USD amount; non-finite values render as ''.
  * @param locale - locale id/tag.
- * @param unit - optional unit suffix supplied by the caller (e.g. `'credits'`).
- * @returns e.g. `'12.35'` or `'12.35 credits'`.
+ * @returns e.g. `'$12.35'`; `''` when the value is not finite.
  */
-export function formatCredits(value, locale = 'en', unit = '') {
+export function formatUsd(value, locale = 'en') {
   const numeric = finiteNumber(value);
   if (numeric === null) return '';
-  const body = numberFormat(locale, { maximumFractionDigits: 2 }).format(numeric);
-  return typeof unit === 'string' && unit !== '' ? `${body} ${unit}` : body;
+  const body = numberFormat(locale, { minimumFractionDigits: 2, maximumFractionDigits: 2 }).format(numeric);
+  return `$${body}`;
 }
 
 /**
@@ -183,10 +167,23 @@ export function formatDateTime(ms, locale = 'en') {
 }
 
 /**
- * Format a quota reset moment.
+ * Format a date only (no time of day).
+ * @param ms - epoch milliseconds (or Date).
+ * @param locale - locale id/tag.
+ * @returns a locale date string; `''` when the value is not a date.
+ */
+export function formatDate(ms, locale = 'en') {
+  const date = toDate(ms);
+  if (date === null) return '';
+  return new Intl.DateTimeFormat(localeTag(locale), {
+    year: 'numeric', month: 'short', day: 'numeric',
+  }).format(date);
+}
+
+/**
+ * Format a reset moment.
  * Same-day resets render as time only (`HH:mm`); other days add the date, and
- * a different year adds the year. Callers prepend `t('time.today')` when they
- * want the relative day word.
+ * a different year adds the year.
  * @param ms - epoch milliseconds (or Date) of the reset.
  * @param locale - locale id/tag.
  * @param now - reference time in epoch milliseconds (defaults to `Date.now()`).
@@ -210,10 +207,10 @@ export function formatResetAt(ms, locale = 'en', now = Date.now()) {
 }
 
 /**
- * Format the time until a reset.
- * Accepts either an absolute timestamp (`nextResetTime`) or a remaining
- * duration in milliseconds; values below {@link EPOCH_MS_THRESHOLD} are read
- * as durations. The caller supplies `t` so every fragment is localized.
+ * Format the time until a moment.
+ * Accepts either an absolute timestamp or a remaining duration in
+ * milliseconds; values below {@link EPOCH_MS_THRESHOLD} are read as durations.
+ * The caller supplies `t` so every fragment is localized.
  * @param target - absolute epoch ms or remaining duration ms.
  * @param t - translate function returning `time.*` fragments.
  * @param now - reference time in epoch milliseconds (defaults to `Date.now()`).
@@ -241,96 +238,6 @@ export function countdown(target, t, now = Date.now()) {
     return parts.join(' ');
   }
   return translate('time.minutesShort', { n: Math.max(1, minutes) });
-}
-
-/** Candidate dictionary keys for one quota window, most specific first. */
-const WINDOW_KEY_CANDIDATES = Object.freeze({
-  fiveHour: ['time.windowFiveHour', 'quota.windowFiveHour', 'page.windowFiveHour', 'widget.windowFiveHour'],
-  week: ['time.windowWeek', 'quota.windowWeek', 'page.windowWeek', 'widget.windowWeek'],
-  tool: ['time.windowTool', 'quota.windowTool', 'page.windowTool', 'widget.windowTool'],
-  other: ['time.windowOther', 'quota.windowOther', 'page.windowOther', 'widget.windowOther'],
-});
-
-/**
- * Classify a quota limit into a display window.
- * The Host normalizer sets `window`; type/unit fallbacks keep older payloads
- * and the ZCode vocabulary (`TIME_LIMIT` tool quota, unit 3 five-hour,
- * unit 6 weekly) readable.
- * @returns `'fiveHour' | 'week' | 'tool' | 'other'`.
- */
-export function resolveWindow(limit) {
-  if (limit === null || typeof limit !== 'object') return 'other';
-  const window = typeof limit.window === 'string' ? limit.window : '';
-  if (window === 'fiveHour' || window === 'week' || window === 'tool') return window;
-  if (window === 'other') return 'other';
-  const type = typeof limit.type === 'string' ? limit.type.toUpperCase() : '';
-  if (type === 'TIME_LIMIT') return 'tool';
-  const unit = finiteNumber(limit.unit);
-  if (unit === 3) return 'fiveHour';
-  if (unit === 6) return 'week';
-  return 'other';
-}
-
-/**
- * Localized label of a quota window.
- * @param limit - quota limit from the overview.
- * @param t - translate function covering the core `time.window*` keys.
- * @returns the first dictionary value that is not an unresolved key echo.
- */
-export function windowLabel(limit, t) {
-  const translate = typeof t === 'function' ? t : (key) => key;
-  const candidates = WINDOW_KEY_CANDIDATES[resolveWindow(limit)] ?? WINDOW_KEY_CANDIDATES.other;
-  for (const key of candidates) {
-    const value = translate(key);
-    if (typeof value === 'string' && value !== '' && value !== key) return value;
-  }
-  return translate(candidates[0]);
-}
-
-/**
- * Used amount of a quota limit, preferring the upstream total/remaining pair.
- * @param limit - quota limit from the overview.
- * @returns used amount (0 when no usable field exists).
- */
-export function limitUsed(limit) {
-  if (limit === null || typeof limit !== 'object') return 0;
-  const total = finiteNumber(limit.number);
-  const remaining = finiteNumber(limit.remaining);
-  if (total !== null && remaining !== null) return Math.max(0, total - remaining);
-  const usage = finiteNumber(limit.usage);
-  if (usage !== null) return Math.max(0, usage);
-  const percentage = finiteNumber(limit.percentage);
-  if (total !== null && percentage !== null) return Math.max(0, (total * percentage) / 100);
-  const current = finiteNumber(limit.currentValue);
-  return current !== null ? Math.max(0, current) : 0;
-}
-
-/**
- * Total amount of a quota limit (`number`, or used + remaining).
- * @param limit - quota limit from the overview.
- * @returns total amount (0 when no usable field exists).
- */
-export function limitTotal(limit) {
-  if (limit === null || typeof limit !== 'object') return 0;
-  const total = finiteNumber(limit.number);
-  if (total !== null) return total;
-  const used = finiteNumber(limit.usage) ?? finiteNumber(limit.currentValue);
-  const remaining = finiteNumber(limit.remaining);
-  return used !== null && remaining !== null ? used + remaining : 0;
-}
-
-/**
- * Remaining amount of a quota limit (`remaining`, else total - used).
- * @param limit - quota limit from the overview.
- * @returns remaining amount (0 when no usable field exists).
- */
-export function remainingOf(limit) {
-  if (limit === null || typeof limit !== 'object') return 0;
-  const remaining = finiteNumber(limit.remaining);
-  if (remaining !== null) return Math.max(0, remaining);
-  const total = limitTotal(limit);
-  if (total > 0) return Math.max(0, total - limitUsed(limit));
-  return 0;
 }
 
 /**

@@ -6,9 +6,9 @@
  *  - the dedicated usage page itself (`main` keyed by PANEL_ID),
  *  - the Grok account row on the Models settings page
  *    (`settings.models.footer`),
- *  - the provisioning note inside each coding-plan provider card
- *    (`settings.models.provider-card`, keyed by the pi-ai settings namespace),
- *  - the composer remaining-quota trigger and popover
+ *  - the one-line subscription note inside the Grok provider card
+ *    (`settings.models.provider-card`, keyed by the grok settings namespace),
+ *  - the composer remaining-credit trigger and popover
  *    (`conversation.input.right`).
  *
  * The usage page is a sidebar destination only: the Settings nav keeps the
@@ -21,8 +21,8 @@ import { CORE_CSS } from './ui.js';
 import { GrokUsagePage, PanelIcon, pageCss, pageDicts } from './page.js';
 import { ComposerIndicator, indicatorCss, indicatorDicts } from './indicator.js';
 import {
+  GrokProviderNote,
   ModelsAccountRow,
-  ProviderCredentialNote,
   modelsRowCss,
   modelsRowDicts,
 } from './models-row.js';
@@ -96,23 +96,21 @@ function apply(ctx) {
     key: PANEL_ID,
     locale: LOCALE_NS,
   }, GrokUsagePage));
-  // Models settings integration: the OAuth account row plus the per-provider
-  // note that its API key is provisioned automatically. The keyed provider-card
-  // seat is dispatched with the pi-ai settings namespace for every pi-ai route.
+  // Models settings integration: the account row plus the one-line note in the
+  // Grok provider card. The keyed provider-card seat is dispatched with the
+  // route's settings namespace; the Host LLM module registers the grok route
+  // under `llm-grok`.
   ctx.slots.inject('settings.models.footer', () => ctx.slots.register({
     name: 'settings.models.footer',
     id: 'grok-account',
     order: 10,
     locale: LOCALE_NS,
   }, ModelsAccountRow));
-  // The pi-ai settings namespace is the Loader entry id (`llm-pi-ai`): the
-  // directory entries carry it as `settingsNs`, and the Models page dispatches
-  // this keyed slot with `entryKey = settingsNs`.
   ctx.slots.inject('settings.models.provider-card', () => ctx.slots.register({
     name: 'settings.models.provider-card',
-    key: 'llm-pi-ai',
+    key: 'llm-grok',
     locale: LOCALE_NS,
-  }, ProviderCredentialNote));
+  }, GrokProviderNote));
   ctx.slots.inject('conversation.input.right', () => ctx.slots.register({
     name: 'conversation.input.right',
     id: 'grok-balance',

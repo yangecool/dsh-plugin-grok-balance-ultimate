@@ -1,24 +1,13 @@
 /**
- * External destinations of the dedicated usage page.
+ * External destinations of the Grok usage surfaces.
  *
- * The Host owns the origin constants; the Client only needs the human-facing
- * website URLs. A user-configured `config.usagePageUrl` wins when it is a valid
- * http(s) URL, otherwise the family default applies. Opening is guarded because
- * the page may render in environments without a browser window object.
+ * The Host owns the account endpoints; the Client only needs the human-facing
+ * usage console. Opening is guarded because the page may render in
+ * environments without a browser window object.
  */
-import { familyId } from './page-helpers.js';
 
-/** Website usage pages per service family. */
-export const FAMILY_USAGE_URLS = Object.freeze({
-  grok: 'https://grok.cn/coding-plan/personal/usage',
-  zai: 'https://z.ai/manage-apikey/coding-plan/personal/usage',
-});
-
-/** Coding Plan product pages per service family. */
-export const FAMILY_PLAN_URLS = Object.freeze({
-  grok: 'https://grok.cn/coding-plan',
-  zai: 'https://z.ai/manage-apikey/coding-plan',
-});
+/** Grok subscription usage console. */
+export const SUPERGROK_URL = 'https://grok.com/supergrok';
 
 /**
  * Whether a value is a valid absolute http(s) URL.
@@ -36,28 +25,6 @@ export function isSafeUrl(value) {
     // Relative or malformed input is not an external destination.
     return false;
   }
-}
-
-/**
- * Website usage page of the configured family.
- * @param config - plugin config snapshot (may be null).
- * @returns absolute URL string.
- */
-export function usageUrlFor(config) {
-  const custom = config && typeof config === 'object' ? config.usagePageUrl : null;
-  if (isSafeUrl(custom)) {
-    return custom.trim();
-  }
-  return FAMILY_USAGE_URLS[familyId(config && config.family)];
-}
-
-/**
- * Coding Plan product page of a family.
- * @param family - 'grok' | 'zai' | other.
- * @returns absolute URL string.
- */
-export function planUrlFor(family) {
-  return FAMILY_PLAN_URLS[familyId(family)];
 }
 
 /**

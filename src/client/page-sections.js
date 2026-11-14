@@ -1,8 +1,9 @@
 /**
- * Signed-in sections of the dedicated Grok usage page: sign-in card, plan
- * card, quota cards, and reset chances.
+ * Signed-in sections of the dedicated Grok usage page: the device-code login
+ * card, the account/subscription card, the credit-usage card, the usage
+ * history table, and the auto-top-up rule card.
  *
- * Each section owns only presentation state (inline confirm, action outcome);
+ * Each section owns only presentation state (inline confirm, copy outcome);
  * every network call goes through the singleton `state` store, and every
  * payload access tolerates a missing or malformed field.
  */
@@ -10,31 +11,17 @@ import { rt } from './runtime.js';
 import { state } from './state.js';
 import { Badge, Bar, Button, Card, EmptyState, Icon, KeyValue, Notice, Spinner } from './ui.js';
 import {
-  billingCycleText,
-  formatCompact,
   formatCountdown,
   formatDateTime,
   formatPercentValue,
   formatResetAt,
-  labelOfLimit,
-  remainingOfLimit,
-  remainingPercentOf,
-  totalOf,
-  usedOf,
+  formatUsd,
+  periodElapsedPercent,
+  periodTypeLabel,
+  tierLabel,
 } from './page-format.js';
-import {
-  barTone,
-  cls,
-  displayNameOf,
-  errorTextOf,
-  familyId,
-  liveOpportunities,
-  planStatusOf,
-  toMs,
-  windowOf,
-  windowOrder,
-} from './page-helpers.js';
-import { openExternal, planUrlFor } from './page-links.js';
+import { cls, errorTextOf, isNumber, remainingPercentOf, toMs } from './page-helpers.js';
+import { openExternal, SUPERGROK_URL } from './page-links.js';
 
 /** Element factory routed through the runtime binding. */
 function el(type, props, ...children) {
@@ -43,71 +30,73 @@ function el(type, props, ...children) {
 }
 
 /**
- * Localized label of a service family.
- * @param t - translator.
- * @param family - family id.
- * @returns 'Grok' or 'Z.AI' label.
+ * One SVG progress ring. The arc is the USED credit fraction; the centered
+ * label is the REMAINING percentage, so a fuller ring means less credit left.
+ * @param props - `usedPercent` (0..100 or null), `remainingText`, `label` (a11y).
+ * @returns the ring element.
  */
-function familyLabel(t, family) {
-  return familyId(family) === 'zai' ? t('page.familyZai') : t('page.familyGrok');
+export function CreditRing(props) {
+  const { usedPercent, remainingText, label } = props ?? {};
+  const used = isNumber(usedPercent) ? Math.min(100, Math.max(0, usedPercent)) : null;
+  const radius = 52;
+  const circumference = 2 * Math.PI * radius;
+  const fraction = used === null ? 0 : used / 100;
+  const toneClass = used === null ? '' : used >= 95 ? ' is-critical' : used >= 80 ? ' is-warning' : '';
+  return el('svg', {
+    className: cls('grk-page-ring', toneClass),
+    viewBox: '0 0 128 128',
+    role: 'img',
+    'aria-label': label,
+  },
+  el('circle', { className: 'grk-page-ring-track', cx: 64, cy: 64, r: radius }),
+  el('circle', {
+    className: 'grk-page-ring-arc',
+    cx: 64,
+    cy: 64,
+    r: radius,
+    transform: 'rotate(-90 64 64)',
+    strokeDasharray: `${(circumference * fraction).toFixed(2)} ${circumference.toFixed(2)}`,
+  }),
+  el('text', {
+    className: 'grk-page-ring-value',
+    x: 64,
+    y: 64,
+    textAnchor: 'middle',
+    dominantBaseline: 'central',
+  }, remainingText));
 }
 
 /**
- * Badge tone/label of a plan status.
- * @param t - translator.
- * @param status - 'active' | 'expired' | 'none'.
- * @returns `{ tone, label }`.
- */
-function planBadge(t, status) {
-  if (status === 'active') return { tone: 'success', label: t('page.planStatusActive') };
-  if (status === 'expired') return { tone: 'error', label: t('page.planStatusExpired') };
-  return { tone: 'idle', label: t('page.planStatusNoPlan') };
-}
-
-/**
- * Open an external page from a button.
- * @param url - absolute URL.
- * @returns nothing.
- */
-function openUrl(url) {
-  openExternal(url);
-}
-
-/**
- * Sign-in card for the logged-out, expired, pending, and failed states.
- * @param props - `t`, `auth`, `login`, `family`, `loadingLogin`.
+ * Device-code login card for the logged-out, expired, pending, and failed
+ * states. Shows the confirmation code in large type with copy support, the
+ * authorization link, and the code's expiry countdown.
+ * @param props - `t`, `flow`, `loginExpired`, `loadingLogin`.
  * @returns the card element.
  */
 export function LoginCard(props) {
-  const { t, auth, login, family, loadingLogin = false } = props ?? {};
+  const { t, flow, loginExpired = false, loadingLogin = false } = props ?? {};
   const React = rt.React;
   const [starting, setStarting] = React.useState(false);
   const [failure, setFailure] = React.useState(null);
-  const loginState = login && typeof login === 'object' ? login.state : 'idle';
-  const authorizeUrl = login && typeof login.authorizeUrl === 'string' && login.authorizeUrl.length > 0
-    ? login.authorizeUrl
-    : null;
-  const expired = (auth !== null && auth !== undefined && auth.loginExpired === true) || loginState === 'expired';
+  const [copied, setCopied] = React.useState(false);
+  const flowState = flow && typeof flow === 'object' ? flow.state : 'idle';
+  const expired = loginExpired === true;
   const busy = starting === true || loadingLogin === true;
-  const pending = busy || loginState === 'starting' || loginState === 'pending';
-  const failed = pending !== true && (failure !== null || loginState === 'failed');
+  const pending = busy || flowState === 'starting' || flowState === 'pending';
+  const failed = pending !== true && (failure !== null || flowState === 'error');
+
+  React.useEffect(() => {
+    if (copied !== true) return undefined;
+    const timer = setTimeout(() => setCopied(false), 2000);
+    return () => clearTimeout(timer);
+  }, [copied]);
 
   async function requestLogin() {
     if (busy) return;
     setStarting(true);
     setFailure(null);
     try {
-      const url = await state.startLogin({ family: familyId(family) });
-      if (typeof url === 'string' && url.length > 0) {
-        try {
-          if (typeof window !== 'undefined' && window !== null) {
-            window.open(url, '_blank', 'noopener');
-          }
-        } catch {
-          // A blocked popup keeps the waiting card visible, which renders the
-          // authorize URL as an explicit link for the user.
-        }
-      }
+      await state.startLogin();
     } catch (error) {
       setFailure(error);
     } finally {
@@ -123,6 +112,53 @@ export function LoginCard(props) {
     }
     setFailure(null);
     setStarting(false);
+    setCopied(false);
+  }
+
+  function copyCode() {
+    const code = flow?.userCode;
+    if (typeof code !== 'string' || code === '') return;
+    try {
+      void navigator.clipboard?.writeText(code).then(() => setCopied(true));
+    } catch {
+      // Clipboard access may be denied; the code stays selectable as text.
+    }
+  }
+
+  if (pending && flowState === 'pending') {
+    const code = typeof flow.userCode === 'string' ? flow.userCode : '';
+    const expiresAt = toMs(flow.expiresAt);
+    const authorizeUrl = flow.verificationUriComplete ?? flow.verificationUri;
+    return el(Card, { className: 'grk-page-card' },
+      el('div', { className: 'grk-page-auth' },
+        el('h3', { className: 'grk-page-auth-title' }, t('page.loginWaitingTitle')),
+        el('div', { className: 'grk-page-device-code', role: 'group', 'aria-label': t('page.loginCode') },
+          el('button', {
+            type: 'button',
+            className: 'grk-page-device-code-value',
+            title: t('page.loginCopy'),
+            onClick: copyCode,
+          }, code !== '' ? code : '—'),
+          el(Button, {
+            variant: 'subtle',
+            size: 'sm',
+            onClick: copyCode,
+          }, el(Icon, { name: 'copy', size: 14 }), copied ? t('page.loginCopied') : t('page.loginCopy'))),
+        el('p', { className: 'grk-page-auth-body' }, t('page.loginWaitingBody')),
+        expiresAt !== null
+          ? el('p', { className: 'grk-page-field-hint' }, t('page.loginCodeExpires', {
+            time: formatCountdown(expiresAt - Date.now(), t),
+          }))
+          : null,
+        el('div', { className: 'grk-page-auth-actions' },
+          authorizeUrl != null
+            ? el(Button, {
+              variant: 'primary',
+              size: 'sm',
+              onClick: () => openExternal(authorizeUrl),
+            }, el(Icon, { name: 'external', size: 14 }), t('page.loginOpenLink'))
+            : null,
+          el(Button, { variant: 'subtle', size: 'sm', onClick: cancelLogin }, t('page.cancel')))));
   }
 
   if (pending) {
@@ -131,18 +167,8 @@ export function LoginCard(props) {
         el('h3', { className: 'grk-page-auth-title' }, t('page.loginWaitingTitle')),
         el('div', { className: 'grk-page-waiting' },
           el(Spinner, { size: 16 }),
-          el('span', null, loginState === 'pending' ? t('page.loginPending') : t('page.loginStarting'))),
+          el('span', null, t('page.loginStarting'))),
         el('p', { className: 'grk-page-auth-body' }, t('page.loginWaitingBody')),
-        authorizeUrl !== null
-          ? el('div', { className: 'grk-page-linkbox' },
-            el('a', {
-              className: 'grk-page-link',
-              href: authorizeUrl,
-              target: '_blank',
-              rel: 'noopener noreferrer',
-            }, t('page.loginOpenLink')),
-            el('span', { className: 'grk-page-link-hint' }, t('page.loginLinkHint')))
-          : null,
         el('div', { className: 'grk-page-auth-actions' },
           el(Button, { variant: 'subtle', size: 'sm', onClick: cancelLogin }, t('page.cancel')))));
   }
@@ -153,7 +179,8 @@ export function LoginCard(props) {
         el('h3', { className: 'grk-page-auth-title' }, t('page.loginFailedTitle')),
         el(Notice, {
           tone: 'error',
-          children: el('span', null, failure !== null ? errorTextOf(failure, t) : t('page.loginFailedBody')),
+          children: el('span', null,
+            flow?.error != null ? flow.error : failure !== null ? errorTextOf(failure, t) : t('page.loginFailedBody')),
         }),
         el('div', { className: 'grk-page-auth-actions' },
           el(Button, { variant: 'primary', busy: busy, onClick: requestLogin }, t('page.loginRetry')),
@@ -167,51 +194,57 @@ export function LoginCard(props) {
         ? el(Notice, { tone: 'warn', children: el('span', null, t('page.loginExpiredBody')) })
         : null,
       el('p', { className: 'grk-page-auth-body' }, t('page.loginBody')),
-      el('p', { className: 'grk-page-field-hint' }, t('page.loginInferenceHint')),
       el('div', { className: 'grk-page-auth-actions' },
-        el(Button, { variant: 'primary', busy: busy, onClick: requestLogin },
-          el(Icon, { name: 'login', size: 14 }),
-          expired ? t('page.loginExpiredAction') : t('page.loginButton'))),
-      el('span', { className: 'grk-page-field-hint' },
-        t('page.loginSiteHint', { family: familyLabel(t, family) }))));
+        el(Button, {
+          variant: 'primary',
+          busy: busy,
+          onClick: requestLogin,
+        }, el(Icon, { name: 'login', size: 14 }), t('page.loginButton')))));
 }
 
 /**
- * Plan card: product, status, billing cycle, renew/expire times, account, and
- * the inline-confirm sign-out action.
- * @param props - `t`, `locale`, `auth`, `subscription`, `family`.
+ * Account/subscription card: identity, tier, billing period with its progress,
+ * and the inline-confirm sign-out action.
+ * @param props - `t`, `locale`, `now`, `login`, `user`, `billing`.
  * @returns the card element.
  */
-export function PlanCard(props) {
-  const { t, locale, auth, subscription, family } = props ?? {};
+export function AccountCard(props) {
+  const { t, locale, now, login, user, billing } = props ?? {};
   const React = rt.React;
   const [confirming, setConfirming] = React.useState(false);
   const [busy, setBusy] = React.useState(false);
   const [failed, setFailed] = React.useState(false);
-  const status = planStatusOf(subscription);
-  const badge = planBadge(t, status);
-  const productName = subscription && typeof subscription.productName === 'string' && subscription.productName.length > 0
-    ? subscription.productName
-    : undefined;
+
+  const userError = user !== null && typeof user === 'object' && user.error != null ? user.error : null;
+  const email = login !== null && typeof login.email === 'string' ? login.email : null;
+  const name = !userError && user !== null && typeof user === 'object' && typeof user.name === 'string' && user.name !== ''
+    ? user.name
+    : null;
+  const tierSource = !userError && user !== null && typeof user === 'object' && typeof user.subscriptionTier === 'string'
+    ? user.subscriptionTier
+    : (billing !== null && typeof billing === 'object' && typeof billing.subscriptionTier === 'string'
+      ? billing.subscriptionTier
+      : null);
+  const tier = tierLabel(tierSource, t);
 
   const rows = [];
-  const cycle = billingCycleText(subscription, t);
-  if (typeof cycle === 'string' && cycle.length > 0) {
-    rows.push({ label: t('page.planBillingCycle'), value: cycle });
+  if (email !== null) rows.push({ label: t('page.accountEmail'), value: email });
+  if (name !== null) rows.push({ label: t('page.accountName'), value: name });
+  if (tier !== null) rows.push({ label: t('page.accountTier'), value: tier });
+
+  const billingPeriod = billing !== null && typeof billing === 'object' && billing.currentPeriod != null
+    && typeof billing.currentPeriod === 'object'
+    ? billing.currentPeriod
+    : null;
+  const periodLabel = periodTypeLabel(billingPeriod?.type, t);
+  const start = toMs(billingPeriod?.start);
+  const end = toMs(billingPeriod?.end);
+  if (start !== null && end !== null) {
+    rows.push({
+      label: t('page.accountPeriod'),
+      value: `${formatDateTime(start, locale, { dateOnly: true })} → ${formatResetAt(end, locale, now)}`,
+    });
   }
-  const renewTime = formatDateTime(subscription && subscription.renewTime, locale);
-  if (renewTime !== '—') {
-    rows.push({ label: t('page.planRenewTime'), value: renewTime });
-  }
-  const expireAt = formatDateTime(subscription && subscription.expireAt, locale);
-  if (expireAt !== '—') {
-    rows.push({ label: t('page.planExpireTime'), value: expireAt });
-  }
-  const accountName = displayNameOf(auth && auth.user, auth && auth.account);
-  if (accountName !== '') {
-    rows.push({ label: t('page.account'), value: accountName });
-  }
-  rows.push({ label: t('page.familyLabel'), value: familyLabel(t, family) });
 
   async function logout() {
     if (busy) return;
@@ -230,17 +263,29 @@ export function PlanCard(props) {
     }
   }
 
-  const body = [
-    el(KeyValue, { key: 'kv', rows }),
-  ];
-  if (status === 'none') {
-    body.push(el('p', { key: 'noplan', className: 'grk-page-auth-body' }, t('page.planNoPlanBody')));
-    body.push(el('div', { key: 'noplan-action', className: 'grk-page-auth-actions' },
-      el(Button, {
-        variant: 'ghost',
-        size: 'sm',
-        onClick: () => openUrl(planUrlFor(family)),
-      }, el(Icon, { name: 'external', size: 14 }), t('page.planOpen'))));
+  const body = [];
+  body.push(userError !== null
+    ? el(Notice, {
+      key: 'user-error',
+      tone: 'warn',
+      children: el('span', null, errorTextOf(userError, t)),
+    })
+    : el(KeyValue, { key: 'kv', rows }));
+  if (periodLabel !== null && start !== null && end !== null) {
+    const progress = periodElapsedPercent(billingPeriod, now);
+    body.push(el('div', { key: 'period', className: 'grk-page-period' },
+      el('div', { className: 'grk-page-period-head' },
+        el('span', { className: 'grk-page-period-label' }, periodLabel),
+        end > now
+          ? el('span', { className: 'grk-page-period-countdown' },
+            t('page.periodEndsIn', { time: formatCountdown(end - now, t) }))
+          : el('span', { className: 'grk-page-period-countdown' }, t('time.resetDue'))),
+      el(Bar, {
+        percent: progress ?? 0,
+        tone: 'brand',
+        height: 6,
+        label: t('page.periodProgress', { percent: formatPercentValue(progress, locale) }),
+      })));
   }
   body.push(confirming === true
     ? el('div', { key: 'logout-confirm', className: 'grk-page-confirm' },
@@ -266,360 +311,149 @@ export function PlanCard(props) {
 
   return el(Card, {
     className: 'grk-page-card',
-    title: t('page.planTitle'),
-    subtitle: productName,
-    actions: el(Badge, { tone: badge.tone }, badge.label),
+    title: t('page.accountTitle'),
+    actions: tier !== null ? el(Badge, { tone: 'brand' }, tier) : null,
   }, el('div', { className: 'grk-page-stack' }, body));
 }
 
 /**
- * One quota-window card.
- * @param props - `t`, `locale`, `now`, `limit`, `fullOverride`.
- * @returns the card element.
+ * Credit usage card: one ring for `creditUsagePercent` (used) with the
+ * remaining percentage beside it, the prepaid balance, and the billing badges.
+ * @param props - `t`, `locale`, `now`, `billing`.
+ * @returns the card element, or an empty state when billing failed.
  */
-export function QuotaCard(props) {
-  const { t, locale, now, limit, fullOverride = false } = props ?? {};
-  const windowName = windowOf(limit);
-  const total = totalOf(limit);
-  const remaining = fullOverride === true ? total : remainingOfLimit(limit);
-  const used = fullOverride === true ? 0 : usedOf(limit);
-  const percent = fullOverride === true ? 100 : remainingPercentOf(limit);
-  const tone = barTone(percent);
-  const resetMs = toMs(limit && limit.nextResetTime);
-  const details = limit && Array.isArray(limit.usageDetails)
-    ? limit.usageDetails.filter((detail) => detail !== null && typeof detail === 'object').slice(0, 6)
-    : [];
-
-  const facts = [];
-  if (used !== null && total !== null) {
-    facts.push(el('span', {
-      key: 'used',
-    }, t('quota.usedOfTotal', {
-      used: formatCompact(used, locale),
-      total: formatCompact(total, locale),
-    })));
-  }
-  if (remaining !== null) {
-    facts.push(el('span', { key: 'remaining' }, t('quota.remainingValue', {
-      remaining: formatCompact(remaining, locale),
-    })));
-  }
-
-  const children = [
-    el('div', { key: 'value', className: 'grk-page-quota-value-row' },
-      el('span', { className: 'grk-page-quota-value' }, formatPercentValue(percent, locale)),
-      el('span', { className: 'grk-page-quota-unit' }, t('quota.remaining'))),
-    el('div', { key: 'bar', className: 'grk-page-quota-bar' },
-      el(Bar, {
-        percent: percent === null ? 0 : percent,
-        tone,
-        height: 8,
-        label: t('quota.remainingPercent', { percent: formatPercentValue(percent, locale) }),
-      })),
-  ];
-  if (facts.length > 0) {
-    children.push(el('div', { key: 'facts', className: 'grk-page-quota-facts' }, facts));
-  }
-  if (resetMs !== null) {
-    children.push(el('div', { key: 'reset', className: 'grk-page-quota-reset' },
-      el('span', null, t('quota.resetIn', { time: formatCountdown(resetMs - now, t) })),
-      el('span', { className: 'grk-page-quota-reset-at' },
-        t('quota.resetAt', { time: formatResetAt(resetMs, locale, now) }))));
-  }
-  if (details.length > 0) {
-    children.push(el('div', { key: 'models', className: 'grk-page-model-list' },
-      el('p', { className: 'grk-page-model-list-title' }, t('quota.modelUsage')),
-      details.map((detail, index) => {
-        const name = typeof detail.displayName === 'string' && detail.displayName.length > 0
-          ? detail.displayName
-          : (typeof detail.modelCode === 'string' && detail.modelCode.length > 0 ? detail.modelCode : '—');
-        return el('div', {
-          key: `model-${typeof detail.modelCode === 'string' ? detail.modelCode : index}`,
-          className: 'grk-page-model-row',
-        },
-        el('span', { className: 'grk-page-model-name', title: name }, name),
-        el('span', { className: 'grk-page-model-value' }, formatCompact(detail.usage, locale)));
-      })));
-  }
-
-  return el(Card, {
-    className: cls('grk-page-card', 'grk-page-quota-card'),
-    title: labelOfLimit(limit, t),
-  }, el('div', { className: 'grk-page-stack' }, children));
-}
-
-/**
- * Quota section: one card per quota window, or the no-plan empty card.
- * @param props - `t`, `locale`, `now`, `quota`, `subscription`, `family`,
- *   `overrides` (window id to boolean map of optimistic post-reset windows), and
- *   `onRetry` for the quota-unavailable state.
- * @returns the section element.
- */
-export function QuotaSection(props) {
-  const { t, locale, now, quota, subscription, family, overrides = null, onRetry } = props ?? {};
-  const limits = quota && Array.isArray(quota.limits)
-    ? quota.limits.filter((limit) => limit !== null && typeof limit === 'object')
-    : [];
-  limits.sort((left, right) => windowOrder(windowOf(left)) - windowOrder(windowOf(right)));
-
-  if (limits.length === 0) {
-    const hasPlan = subscription !== null && subscription !== undefined
-      && typeof subscription === 'object' && subscription.active === true;
-    if (hasPlan) {
-      return el(Card, { className: 'grk-page-card' },
-        el(EmptyState, {
-          icon: 'gauge',
-          title: t('page.quotaUnavailable'),
-          body: t('page.quotaUnavailableBody'),
-          action: el(Button, {
-            variant: 'ghost',
-            size: 'sm',
-            onClick: typeof onRetry === 'function' ? onRetry : undefined,
-          }, t('page.retry')),
-        }));
-    }
-    return el(Card, { className: 'grk-page-card' },
+export function UsageCard(props) {
+  const { t, locale, now, billing } = props ?? {};
+  if (billing === null || typeof billing !== 'object') {
+    return el(Card, { className: 'grk-page-card', title: t('page.usageTitle') },
       el(EmptyState, {
         icon: 'gauge',
-        title: t('quota.noPlanTitle'),
-        body: t('quota.noPlanBody'),
-        action: el(Button, {
-          variant: 'ghost',
-          size: 'sm',
-          onClick: () => openUrl(planUrlFor(family)),
-        }, el(Icon, { name: 'external', size: 14 }), t('quota.noPlanAction')),
+        title: t('page.usageUnavailable'),
+        body: t('page.usageUnavailableBody'),
       }));
   }
-
-  return el('section', { className: 'grk-page-stack' },
-    el('div', { className: 'grk-page-section-head' },
-      el('h2', { className: 'grk-page-section-title' }, t('page.sectionQuota')),
-      quota && (typeof quota.level === 'string' || typeof quota.level === 'number')
-        ? el(Badge, { tone: 'neutral' }, String(quota.level))
-        : null),
-    el('div', { className: 'grk-page-quota-grid' },
-      limits.map((limit, index) => {
-        const windowName = windowOf(limit);
-        return el(QuotaCard, {
-          key: `quota-${windowName}-${index}`,
-          t,
-          locale,
-          now,
-          limit,
-          fullOverride: overrides !== null && overrides[windowName] === true,
-        });
-      })));
-}
-
-/** Reset kinds with their Host resetType and dictionary keys. */
-const RESET_KINDS = Object.freeze([
-  {
-    resetType: 'FIVE_HOUR',
-    key: 'fiveHour',
-    titleKey: 'reset.fiveHour',
-    kindKey: 'reset.kindsFiveHour',
-  },
-  {
-    resetType: 'WEEK',
-    key: 'week',
-    titleKey: 'reset.week',
-    kindKey: 'reset.kindsWeek',
-  },
-]);
-
-/**
- * Localized error text of a failed reset attempt.
- * @param t - translator.
- * @param error - store error payload.
- * @returns localized message.
- */
-function resetErrorText(t, error) {
-  const code = error && typeof error === 'object' && typeof error.code === 'string' ? error.code : '';
-  if (code === 'reset_throttled' || code === 'rate_limited') {
-    return t('reset.throttled');
+  if (billing.error != null) {
+    return el(Card, { className: 'grk-page-card', title: t('page.usageTitle') },
+      el(EmptyState, {
+        icon: 'gauge',
+        title: t('page.usageUnavailable'),
+        body: errorTextOf(billing.error, t),
+      }));
   }
-  if (code === 'reset_upstream_busy') {
-    return t('reset.upstreamBusy');
-  }
-  if (code === 'reset_unavailable') {
-    return t('reset.unavailable');
-  }
-  if (code === 'login_expired' || code === 'not_logged_in') {
-    return t('page.loginExpiredBody');
-  }
-  if (code === '') {
-    return t('reset.failed');
-  }
-  return errorTextOf(error, t);
-}
+  const usedPercent = isNumber(billing.creditUsagePercent) ? billing.creditUsagePercent : null;
+  const remainingPercent = remainingPercentOf(billing);
+  const prepaid = isNumber(billing.prepaidBalanceUsd) ? billing.prepaidBalanceUsd : null;
+  const periodEnd = toMs(billing.currentPeriod?.end);
 
-/**
- * Reset-chances card.
- *
- * Mirrors ZCode's manual-use guards: the action is gated on opportunities that
- * are still live (`expireAt > now`), and confirming re-reads the reset status
- * first so a stale payload can never send a `/use` the backend would answer
- * with its 500/code-2007 dependency envelope. The store generates the
- * idempotency key and forces the reset/overview refresh after a successful use.
- * @param props - `t`, `locale`, `now`, `reset`, `onUsed(resetType)`.
- * @returns the card element, or null when the payload has no window data.
- */
-export function ResetCard(props) {
-  const { t, locale, now, reset, onUsed } = props ?? {};
-  const React = rt.React;
-  const [confirmKind, setConfirmKind] = React.useState(null);
-  const [busyKind, setBusyKind] = React.useState(null);
-  const [outcome, setOutcome] = React.useState(null);
-  if (reset === null || reset === undefined || typeof reset !== 'object') {
-    return null;
+  const badges = [];
+  if (billing.onDemandEnabled === true) badges.push(el(Badge, { key: 'ondemand', tone: 'neutral' }, t('page.usageOnDemand')));
+  if (billing.isUnifiedBillingUser === true) badges.push(el(Badge, { key: 'unified', tone: 'neutral' }, t('page.usageUnifiedBilling')));
+
+  const facts = [];
+  facts.push(el('div', { key: 'used', className: 'grk-page-usage-fact' },
+    el('span', { className: 'grk-page-usage-fact-label' }, t('page.usageUsed')),
+    el('span', {
+      className: cls('grk-page-usage-fact-value', usedPercent !== null && usedPercent >= 95
+        ? 'is-critical'
+        : usedPercent !== null && usedPercent >= 80 ? 'is-warning' : null),
+    }, formatPercentValue(usedPercent, locale))));
+  if (prepaid !== null) {
+    facts.push(el('div', { key: 'prepaid', className: 'grk-page-usage-fact' },
+      el('span', { className: 'grk-page-usage-fact-label' }, t('page.usagePrepaid')),
+      el('span', { className: 'grk-page-usage-fact-value' }, formatUsd(prepaid, locale))));
   }
-  const kinds = RESET_KINDS.filter((kind) => reset[kind.key] !== null && typeof reset[kind.key] === 'object');
-  if (kinds.length === 0) {
-    return null;
-  }
-
-  /**
-   * Count the still-live chances of one window at an explicit instant, so the
-   * click-time reconciliation reuses the exact render-time judgment.
-   */
-  function liveCountOf(kind, atMs, source) {
-    const data = source !== null && typeof source === 'object' ? source[kind.key] : null;
-    const available = data !== null && typeof data === 'object' && Array.isArray(data.available)
-      ? data.available
-      : [];
-    return liveOpportunities(available, atMs).length;
-  }
-
-  async function useReset(kind) {
-    setConfirmKind(null);
-    setBusyKind(kind.resetType);
-    setOutcome(null);
-    try {
-      // Click-time gate: chances that expired since the last render are not
-      // redeemable anymore (ZCode: `opportunityExpiresAt > now` at click).
-      if (liveCountOf(kind, Date.now(), reset) === 0) {
-        setOutcome({ status: 'unavailable', kind: kind.kindKey });
-        return;
-      }
-      // Reconcile with the server before consuming: a background-tab-stale
-      // payload may still list chances the backend has already taken away. A
-      // failed refresh keeps the click going — the `/use` result stays
-      // authoritative (ZCode reconciles the same way around a manual use).
-      const fresh = await state.loadReset({ force: true });
-      if (fresh !== null && typeof fresh === 'object' && liveCountOf(kind, Date.now(), fresh) === 0) {
-        setOutcome({ status: 'unavailable', kind: kind.kindKey });
-        return;
-      }
-      const result = await state.useReset(kind.resetType);
-      if (result !== null && typeof result === 'object' && result.ok === true) {
-        setOutcome({ status: 'success', kind: kind.kindKey });
-        if (typeof onUsed === 'function') {
-          onUsed(kind.resetType);
-        }
-      } else {
-        const error = result !== null && typeof result === 'object' ? result.error : null;
-        const code = error && typeof error === 'object' && typeof error.code === 'string' ? error.code : '';
-        setOutcome({
-          status: code === 'reset_throttled' || code === 'rate_limited' ? 'throttled' : 'error',
-          error,
-        });
-      }
-    } catch (error) {
-      setOutcome({ status: 'error', error });
-    } finally {
-      setBusyKind(null);
-    }
-  }
-
-  const notices = [];
-  if (outcome !== null && outcome.status === 'success') {
-    notices.push(el(Notice, { key: 'success', tone: 'info', children: el('span', null, t('reset.success')) }));
-  } else if (outcome !== null && outcome.status === 'throttled') {
-    notices.push(el(Notice, { key: 'throttled', tone: 'warn', children: el('span', null, t('reset.throttled')) }));
-  } else if (outcome !== null && outcome.status === 'unavailable') {
-    notices.push(el(Notice, {
-      key: 'unavailable',
-      tone: 'warn',
-      children: el('span', null, t('reset.noneLive')),
-    }));
-  } else if (outcome !== null && outcome.status === 'error') {
-    notices.push(el(Notice, {
-      key: 'error',
-      tone: 'error',
-      children: el('span', null, resetErrorText(t, outcome.error)),
-    }));
-  }
-
-  const rows = [];
-  for (const kind of kinds) {
-    const data = reset[kind.key];
-    const available = Array.isArray(data.available)
-      ? data.available.filter((entry) => entry !== null && typeof entry === 'object')
-      : [];
-    // ZCode parity: only chances whose expiry is still in the future are
-    // redeemable; the count and the action follow the live subset.
-    const nowMs = typeof now === 'number' ? now : Date.now();
-    const live = liveOpportunities(available, nowMs);
-    const count = live.length;
-    const expired = available.length - live.length;
-    const expiries = live
-      .map((entry) => toMs(entry.expireAt))
-      .filter((value) => value !== null);
-    const earliestExpiry = expiries.length > 0 ? Math.min(...expiries) : null;
-    const latestUsed = data.latest !== null && typeof data.latest === 'object' ? toMs(data.latest.usedAt) : null;
-    const kindLabel = t(kind.kindKey);
-    const busy = busyKind === kind.resetType;
-    const confirming = confirmKind === kind.resetType;
-
-    rows.push(el('div', { key: `row-${kind.key}`, className: 'grk-page-reset-row' },
-      el('div', { className: 'grk-page-reset-main' },
-        el('span', { className: 'grk-page-reset-title' }, t(kind.titleKey)),
-        el('div', { className: 'grk-page-reset-meta' },
-          el('span', null, t('reset.availableCount', { count })),
-          expired > 0
-            ? el('span', null, t('reset.expiredHint', { count: expired }))
-            : null,
-          earliestExpiry !== null
-            ? el('span', null, t('reset.expiresAt', { time: formatResetAt(earliestExpiry, locale, now) }))
-            : null,
-          latestUsed !== null
-            ? el('span', null, t('reset.latestUsed', { time: formatResetAt(latestUsed, locale, now) }))
-            : el('span', null, t('reset.neverUsed')))),
-      el('div', { className: 'grk-page-inline' },
-        el('span', { className: 'grk-page-reset-count' }, t('reset.availableCount', { count })),
-        el(Button, {
-          variant: count > 0 ? 'ghost' : 'subtle',
-          size: 'sm',
-          disabled: count === 0 || busy,
-          busy,
-          onClick: () => setConfirmKind(kind.resetType),
-          title: count === 0 ? t('reset.none') : t('reset.useAria', { kind: kindLabel }),
-        }, t('reset.use')))));
-
-    if (confirming) {
-      rows.push(el('div', { key: `confirm-${kind.key}`, className: 'grk-page-confirm' },
-        el('span', { className: 'grk-page-confirm-text' }, t('reset.confirmUse', { kind: kindLabel })),
-        el(Button, {
-          variant: 'primary',
-          size: 'sm',
-          busy,
-          onClick: () => useReset(kind),
-        }, t('reset.confirmAction')),
-        el(Button, {
-          variant: 'subtle',
-          size: 'sm',
-          disabled: busy,
-          onClick: () => setConfirmKind(null),
-        }, t('page.cancel')),
-        el('span', { className: 'grk-page-field-hint' }, t('reset.confirmHint'))));
-    }
+  if (periodEnd !== null && periodEnd > now) {
+    facts.push(el('div', { key: 'reset', className: 'grk-page-usage-fact' },
+      el('span', { className: 'grk-page-usage-fact-label' }, t('page.usageResetsIn')),
+      el('span', { className: 'grk-page-usage-fact-value' }, formatCountdown(periodEnd - now, t))));
   }
 
   return el(Card, {
     className: 'grk-page-card',
-    title: t('page.sectionReset'),
-    actions: reset.hasUnreadHistory === true
-      ? el(Badge, { tone: 'brand' }, t('reset.unreadHistory'))
-      : null,
-  }, el('div', { className: 'grk-page-stack' }, [...notices, ...rows]));
+    title: t('page.usageTitle'),
+    actions: badges.length > 0 ? el('span', { className: 'grk-page-inline' }, badges) : null,
+  }, el('div', { className: 'grk-page-usage' },
+    el(CreditRing, {
+      usedPercent,
+      remainingText: formatPercentValue(remainingPercent, locale),
+      label: t('page.usageRingLabel', {
+        used: formatPercentValue(usedPercent, locale),
+        remaining: formatPercentValue(remainingPercent, locale),
+      }),
+    }),
+    el('div', { className: 'grk-page-usage-side' }, facts)));
+}
+
+/**
+ * Usage history card: the billing per-cycle USD table.
+ * @param props - `t`, `locale`, `billing`.
+ * @returns the card element.
+ */
+export function HistoryCard(props) {
+  const { t, locale, billing } = props ?? {};
+  const history = billing !== null && typeof billing === 'object' && Array.isArray(billing.history)
+    ? billing.history.filter((entry) => entry !== null && typeof entry === 'object')
+    : [];
+  if (history.length === 0) {
+    return el(Card, { className: 'grk-page-card', title: t('page.historyTitle') },
+      el(EmptyState, {
+        icon: 'chart',
+        title: t('page.historyEmpty'),
+        body: t('page.historyEmptyBody'),
+      }));
+  }
+  return el(Card, { className: 'grk-page-card', title: t('page.historyTitle') },
+    el('div', { className: 'grk-page-history grk-scroll' },
+      el('table', { className: 'grk-page-history-table' },
+        el('thead', null,
+          el('tr', null,
+            el('th', { scope: 'col' }, t('page.historyCycle')),
+            el('th', { scope: 'col' }, t('page.historyIncluded')),
+            el('th', { scope: 'col' }, t('page.historyOnDemand')),
+            el('th', { scope: 'col' }, t('page.historyTotal')))),
+        el('tbody', null,
+          history.map((entry, index) => el('tr', { key: `${entry.billingCycle ?? index}-${index}` },
+            el('td', { className: 'grk-page-history-cycle' },
+              typeof entry.billingCycle === 'string' && entry.billingCycle !== '' ? entry.billingCycle : '—'),
+            el('td', null, formatUsd(entry.includedUsedUsd, locale)),
+            el('td', null, formatUsd(entry.onDemandUsedUsd, locale)),
+            el('td', { className: 'grk-page-history-total' }, formatUsd(entry.totalUsedUsd, locale))))))));
+}
+
+/**
+ * Auto-top-up rule card; renders nothing when the account has no rule.
+ * @param props - `t`, `locale`, `topup`.
+ * @returns the card element, or null.
+ */
+export function TopupCard(props) {
+  const { t, locale, topup } = props ?? {};
+  if (topup === null || topup === undefined || typeof topup !== 'object') {
+    return null;
+  }
+  const rows = [
+    { label: t('page.topupEnabled'), value: topup.enabled === true ? t('page.topupOn') : t('page.topupOff') },
+    ...(isNumber(topup.minBeforeHittingSlUsd)
+      ? [{ label: t('page.topupMinBefore'), value: formatUsd(topup.minBeforeHittingSlUsd, locale) }]
+      : []),
+    ...(isNumber(topup.topupAmountUsd)
+      ? [{ label: t('page.topupAmount'), value: formatUsd(topup.topupAmountUsd, locale) }]
+      : []),
+    ...(isNumber(topup.maxAmountPerMonthUsd)
+      ? [{ label: t('page.topupMonthlyCap'), value: formatUsd(topup.maxAmountPerMonthUsd, locale) }]
+      : []),
+  ];
+  return el(Card, {
+    className: 'grk-page-card',
+    title: t('page.topupTitle'),
+    actions: el(Badge, { tone: topup.enabled === true ? 'success' : 'idle' },
+      topup.enabled === true ? t('page.topupOn') : t('page.topupOff')),
+  }, el('div', { className: 'grk-page-stack' },
+    el(KeyValue, { rows }),
+    el('div', { className: 'grk-page-inline' },
+      el('span', { className: 'grk-page-spacer' }),
+      el(Button, {
+        variant: 'ghost',
+        size: 'sm',
+        onClick: () => openExternal(SUPERGROK_URL),
+      }, el(Icon, { name: 'external', size: 14 }), t('page.openConsole')))));
 }

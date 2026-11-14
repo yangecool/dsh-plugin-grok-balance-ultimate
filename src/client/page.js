@@ -4,29 +4,24 @@
  *
  * The page is a root-scope slot component. It renders without any session
  * binding, reads everything from the singleton store through the shared hooks,
- * and loads its own data once per login/range change. Every section is
- * defensive: a missing payload renders a state instead of throwing, so a
- * partially loaded account never blanks the panel.
+ * and loads its own data once per login change. Every section is defensive: a
+ * missing payload renders a state instead of throwing, so a partially loaded
+ * account never blanks the panel.
  */
 import { rt } from './runtime.js';
 import { state } from './state.js';
 import { useLocalized, useNow, useSnapshot } from './hooks.js';
-import { Badge, Button, Icon, Notice } from './ui.js';
+import { Icon, Notice, Button } from './ui.js';
 import { formatRelative } from './format.js';
-import { InferenceCard, SettingsCard } from './page-settings.js';
-import { LoginCard, PlanCard, QuotaSection, ResetCard } from './page-sections.js';
-import { UsageSection } from './page-usage.js';
+import { SettingsCard } from './page-settings.js';
 import {
-  attempt,
-  avatarOf,
-  cls,
-  displayNameOf,
-  errorTextOf,
-  familyId,
-  initialsOf,
-  isNumber,
-  planStatusOf,
-} from './page-helpers.js';
+  AccountCard,
+  HistoryCard,
+  LoginCard,
+  TopupCard,
+  UsageCard,
+} from './page-sections.js';
+import { attempt, cls, errorTextOf, isNumber } from './page-helpers.js';
 
 export { pageCss } from './page-css.js';
 export { pageDicts } from './page-dicts.js';
@@ -37,93 +32,31 @@ function el(type, props, ...children) {
   return typeof h === 'function' ? h(type, props, ...children) : null;
 }
 
-/** Usage ranges accepted by the range switcher. */
-const USAGE_RANGES = Object.freeze(['today', '7d', '30d']);
-
 /**
- * Localized label of a service family.
- * @param t - translator.
- * @param family - family id.
- * @returns 'Grok' or 'Z.AI' label.
- */
-function familyLabel(t, family) {
-  return familyId(family) === 'zai' ? t('page.familyZai') : t('page.familyGrok');
-}
-
-/**
- * Plan status badge label of a subscription.
- * @param t - translator.
- * @param subscription - subscription payload.
- * @returns localized status label.
- */
-function planStatusText(t, subscription) {
-  const status = planStatusOf(subscription);
-  if (status === 'active') return t('page.planStatusActive');
-  if (status === 'expired') return t('page.planStatusExpired');
-  return t('page.planStatusNoPlan');
-}
-
-/**
- * Account chip: avatar with initials fallback, display name, plan status, and
- * the service-family badge.
- * @param props - `t`, `auth`, `subscription`, `family`.
- * @returns the chip element.
- */
-function AccountChip(props) {
-  const { t, auth, subscription, family } = props ?? {};
-  const user = auth !== null && auth !== undefined && typeof auth === 'object' ? auth.user : null;
-  const account = auth !== null && auth !== undefined && typeof auth === 'object' ? auth.account : null;
-  const name = displayNameOf(user, account);
-  const avatar = avatarOf(user, account);
-  return el('div', { className: 'grk-page-account' },
-    el('span', { className: 'grk-page-avatar' },
-      el('span', { className: 'grk-page-avatar-initials' },
-        name !== '' ? initialsOf(name) : el(Icon, { name: 'user', size: 13 })),
-      avatar !== null
-        ? el('img', {
-          className: 'grk-page-avatar-img',
-          src: avatar,
-          alt: '',
-          loading: 'lazy',
-          referrerPolicy: 'no-referrer',
-          onError: (event) => {
-            try {
-              if (event !== null && event.currentTarget !== null) {
-                event.currentTarget.style.display = 'none';
-              }
-            } catch {
-              // A hidden broken avatar leaves the initials fallback visible.
-            }
-          },
-        })
-        : null),
-    el('span', { className: 'grk-page-account-text' },
-      el('span', { className: 'grk-page-account-name' }, name !== '' ? name : t('page.signedOut')),
-      el('span', { className: 'grk-page-account-meta' }, planStatusText(t, subscription))),
-    el(Badge, { tone: 'brand' }, familyLabel(t, family)));
-}
-
-/**
- * Page header: title, subtitle, account chip, refresh action, and freshness.
- * @param props - `t`, `auth`, `subscription`, `family`, `lastUpdated`, `now`,
- *   `stale`, `busy`, `onRefresh`.
+ * Page header: title, subtitle, login identity, refresh action, and freshness.
+ * @param props - `t`, `login`, `lastUpdated`, `now`, `stale`, `busy`, `onRefresh`.
  * @returns the header element.
  */
 function PageHeader(props) {
   const {
-    t, auth, subscription, family, lastUpdated, now,
-    stale = false, busy = false, onRefresh,
+    t, login, lastUpdated, now, stale = false, busy = false, onRefresh,
   } = props ?? {};
   const updated = isNumber(lastUpdated)
     ? attempt(() => formatRelative(lastUpdated, t, now), '')
     : '';
   const hasUpdated = typeof updated === 'string' && updated.length > 0;
+  const email = login !== null && typeof login === 'object' && typeof login.email === 'string' ? login.email : null;
   return el('header', { className: 'grk-page-header' },
     el('div', { className: 'grk-page-heading' },
       el('h1', { className: 'grk-page-title' }, t('page.title')),
       el('p', { className: 'grk-page-subtitle' }, t('page.subtitle'))),
     el('div', { className: 'grk-page-header-side' },
-      el(AccountChip, { t, auth, subscription, family }),
+      el('div', { className: 'grk-page-account' },
+        el('span', { className: 'grk-page-avatar' },
+          el('span', { className: 'grk-page-avatar-initials' }, el(Icon, { name: 'user', size: 13 }))),
+        el('span', { className: 'grk-page-account-text' },
+          el('span', { className: 'grk-page-account-name' },
+            email !== null ? email : t('page.signedOut')))),
       el('div', { className: 'grk-page-inline' },
         el(Button, {
           variant: 'ghost',
@@ -154,128 +87,57 @@ export function GrokUsagePage(props) {
   const t = typeof tProp === 'function' ? tProp : localized.t;
   const locale = localized !== null && localized !== undefined && localized.locale === 'zh' ? 'zh' : 'en';
 
-  const [usageRequested, setUsageRequested] = React.useState(false);
-  const [optimisticResets, setOptimisticResets] = React.useState({});
-  const loadKeyRef = React.useRef('');
+  const loadKeyRef = React.useRef(false);
 
   const snap = snapshot !== null && snapshot !== undefined && typeof snapshot === 'object' ? snapshot : {};
   const config = snap.config !== null && snap.config !== undefined ? snap.config : null;
   const overview = snap.overview !== null && snap.overview !== undefined ? snap.overview : null;
-  const auth = snap.auth !== null && snap.auth !== undefined
-    ? snap.auth
-    : (overview !== null && overview.auth !== null && overview.auth !== undefined ? overview.auth : null);
-  const subscription = overview !== null && overview.subscription !== null && overview.subscription !== undefined
-    ? overview.subscription
-    : null;
-  const quota = overview !== null && overview.quota !== null && overview.quota !== undefined ? overview.quota : null;
-  const inference = snap.inference !== null && snap.inference !== undefined
-    ? snap.inference
-    : (overview !== null && overview.inference !== null && overview.inference !== undefined ? overview.inference : null);
-  const login = snap.login !== null && snap.login !== undefined && typeof snap.login === 'object'
-    ? snap.login
-    : { state: 'idle', authorizeUrl: null, error: null };
+  const loggedIn = snap.loggedIn === true;
+  const login = snap.login !== null && snap.login !== undefined ? snap.login : null;
+  const flow = snap.flow !== null && snap.flow !== undefined && typeof snap.flow === 'object'
+    ? snap.flow
+    : { state: 'idle' };
   const loading = snap.loading !== null && snap.loading !== undefined && typeof snap.loading === 'object'
     ? snap.loading
     : {};
-  const usageRange = USAGE_RANGES.includes(snap.usageRange) ? snap.usageRange : 'today';
-  const usage = snap.usage !== null && snap.usage !== undefined ? snap.usage : null;
-  const loggedIn = auth !== null && auth.loggedIn === true && auth.loginExpired !== true;
-  const family = familyId(auth !== null && auth.family !== null && auth.family !== undefined ? auth.family : config !== null ? config.family : null);
-  const resetBlock = snap.reset !== null && snap.reset !== undefined
-    ? snap.reset
-    : (overview !== null && overview.reset !== null && overview.reset !== undefined ? overview.reset : null);
+  const user = overview !== null && overview.user !== null && overview.user !== undefined ? overview.user : null;
+  const billing = overview !== null && overview.billing !== null && overview.billing !== undefined
+    ? overview.billing
+    : null;
+  const topup = overview !== null ? overview.topup : null;
   const generatedAt = overview !== null && isNumber(overview.generatedAt) ? overview.generatedAt : null;
   const lastUpdated = isNumber(snap.lastUpdated) ? snap.lastUpdated : generatedAt;
 
-  // Load what the page needs once per login/range change; the store caches and
-  // shares in-flight requests, so repeated mounts never duplicate work.
+  // Load what the page needs once; the store caches and shares in-flight
+  // requests, so repeated mounts never duplicate work.
   React.useEffect(() => {
     void state.refreshOverview({ force: false });
   }, []);
 
-  React.useEffect(() => {
-    if (loggedIn !== true) {
-      loadKeyRef.current = '';
-      setUsageRequested(false);
-      return undefined;
-    }
-    const key = `${usageRange}`;
-    if (loadKeyRef.current === key) {
-      return undefined;
-    }
-    loadKeyRef.current = key;
-    setUsageRequested(true);
-    void state.loadUsage(usageRange);
-    void state.loadReset({ force: false });
-    return undefined;
-  }, [loggedIn, usageRange]);
-
   // Refresh once when a sign-in completes while the page stays mounted.
-  const loginReadyRef = React.useRef(false);
   React.useEffect(() => {
-    const ready = login.state === 'ready' || (loggedIn === true && loginReadyRef.current !== true);
-    loginReadyRef.current = loggedIn === true;
-    if (ready !== true || loggedIn !== true) {
-      return;
-    }
+    if (loggedIn !== true || loadKeyRef.current === true) return;
+    loadKeyRef.current = true;
     void state.refreshOverview({ force: true });
-  }, [login.state, loggedIn]);
-
-  // Drop optimistic reset overrides once a fresh overview has been generated.
+  }, [loggedIn]);
   React.useEffect(() => {
-    const windows = Object.keys(optimisticResets);
-    if (windows.length === 0) {
-      return;
-    }
-    if (generatedAt !== null && windows.every((windowName) => generatedAt >= optimisticResets[windowName])) {
-      setOptimisticResets({});
-    }
-  }, [optimisticResets, generatedAt]);
+    if (loggedIn === true) return;
+    loadKeyRef.current = false;
+  }, [loggedIn]);
 
   function refreshAll() {
     void state.refreshOverview({ force: true });
-    if (loggedIn === true) {
-      void state.loadUsage(usageRange, { force: true });
-      void state.loadReset({ force: true });
-    }
-  }
-
-  function changeRange(next) {
-    if (!USAGE_RANGES.includes(next)) {
-      return;
-    }
-    state.setUsageRange(next);
-    void state.loadUsage(next);
-  }
-
-  function retryUsage() {
-    setUsageRequested(true);
-    void state.loadUsage(usageRange, { force: true });
-  }
-
-  function handleResetUsed(resetType) {
-    const windowName = resetType === 'WEEK' ? 'week' : 'fiveHour';
-    setOptimisticResets((previous) => ({ ...previous, [windowName]: Date.now() }));
-  }
-
-  const overrides = {};
-  for (const windowName of Object.keys(optimisticResets)) {
-    if (generatedAt === null || generatedAt < optimisticResets[windowName]) {
-      overrides[windowName] = true;
-    }
   }
 
   const columnChildren = [];
   columnChildren.push(el(PageHeader, {
     key: 'header',
     t,
-    auth,
-    subscription,
-    family,
+    login,
     lastUpdated,
     now,
     stale: overview !== null && overview.stale === true,
-    busy: loading.overview === true || loading.usage === true,
+    busy: loading.overview === true,
     onRefresh: refreshAll,
   }));
 
@@ -297,74 +159,42 @@ export function GrokUsagePage(props) {
     columnChildren.push(el(LoginCard, {
       key: 'login',
       t,
-      auth,
-      login,
-      family,
+      flow,
+      loginExpired: snap.loginExpired === true,
       loadingLogin: loading.login === true,
-    }));
-    columnChildren.push(el(InferenceCard, {
-      key: 'inference',
-      t,
-      locale,
-      now,
-      auth,
-      config,
-      inference,
     }));
     columnChildren.push(el(SettingsCard, { key: 'settings', t, config }));
   } else {
     const sections = [];
-    sections.push(el(PlanCard, {
-      key: 'plan',
-      t,
-      locale,
-      auth,
-      subscription,
-      family,
-    }));
-    sections.push(el(QuotaSection, {
-      key: 'quota',
+    sections.push(el(AccountCard, {
+      key: 'account',
       t,
       locale,
       now,
-      quota,
-      subscription,
-      family,
-      overrides,
-      onRetry: refreshAll,
+      login,
+      user,
+      billing,
     }));
-    if (resetBlock !== null) {
-      sections.push(el(ResetCard, {
-        key: 'reset',
-        t,
-        locale,
-        now,
-        reset: resetBlock,
-        onUsed: handleResetUsed,
-      }));
-    }
-    sections.push(el(UsageSection, {
+    sections.push(el(UsageCard, {
       key: 'usage',
       t,
       locale,
       now,
-      range: usageRange,
-      usage,
-      loading: loading.usage === true,
-      error: snap.error !== null && snap.error !== undefined ? snap.error : null,
-      requested: usageRequested,
-      onRangeChange: changeRange,
-      onRetry: retryUsage,
+      billing,
     }));
-    sections.push(el(InferenceCard, {
-      key: 'inference',
+    sections.push(el(HistoryCard, {
+      key: 'history',
       t,
       locale,
-      now,
-      auth,
-      config,
-      inference,
+      billing,
     }));
+    const topupCard = el(TopupCard, {
+      key: 'topup',
+      t,
+      locale,
+      topup,
+    });
+    if (topupCard !== null) sections.push(topupCard);
     sections.push(el(SettingsCard, { key: 'settings', t, config }));
     columnChildren.push(el('div', { key: 'sections', className: 'grk-page-sections' }, sections));
   }
@@ -384,8 +214,9 @@ export function GrokUsagePage(props) {
 }
 
 /**
- * Sidebar glyph of the usage page: a rounded quota card with three bars and a
- * status dot. 16/18px target size, `currentColor` strokes, no external assets.
+ * Sidebar glyph of the usage page: a rounded card with the Grok spark mark
+ * and a status dot. 16/18px target size, `currentColor` strokes, no external
+ * assets.
  * @param props - `size` in pixels (clamped 12..24), `active` selection flag.
  * @returns the sidebar icon element.
  */
@@ -414,9 +245,11 @@ export function PanelIcon(props) {
     strokeWidth: 1.3,
     opacity: selected ? 1 : 0.72,
   }),
-  el('rect', { x: 4.1, y: 4.5, width: 7.8, height: 1.7, rx: 0.85, fill: 'currentColor' }),
-  el('rect', { x: 4.1, y: 7.2, width: 5.8, height: 1.7, rx: 0.85, fill: 'currentColor', opacity: 0.78 }),
-  el('rect', { x: 4.1, y: 9.9, width: 3.9, height: 1.7, rx: 0.85, fill: 'currentColor', opacity: 0.56 }),
+  // Four-point Grok spark: vertical and horizontal rays crossing off-center.
+  el('path', {
+    d: 'M8 4.2 L8.9 7.1 L11.8 8 L8.9 8.9 L8 11.8 L7.1 8.9 L4.2 8 L7.1 7.1 Z',
+    fill: 'currentColor',
+  }),
   el('circle', {
     cx: 11.9,
     cy: 11.8,

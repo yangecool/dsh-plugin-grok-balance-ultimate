@@ -2,17 +2,16 @@
  * Models settings page integration for the Grok account.
  *
  * Two contributions live here:
- *  - `ModelsAccountRow` in `settings.models.footer`: an account row that mirrors
- *    the host's own account row (identity, status dot, sign-in state, edit
- *    action) next to the provider rows;
- *  - `ProviderCredentialNote` in `settings.models.provider-card` (keyed by the
- *    pi-ai settings namespace): a short note inside a coding-plan provider card
- *    stating that the API key is provisioned by the OAuth sign-in, so nobody
- *    pastes a key that the plugin already manages.
+ *  - `ModelsAccountRow` in `settings.models.footer`: an account row (status
+ *    dot, sign-in state, email, expandable details, sign-out) beside the
+ *    provider rows;
+ *  - `GrokProviderNote` in `settings.models.provider-card` (keyed by the
+ *    grok route's `llm-grok` settings namespace): one line inside the Grok
+ *    provider card stating that the subscription sign-in covers inference and
+ *    search, so no API key is needed.
  *
- * The plugin already writes the Coding Plan project token into the credential
- * reference the provider card resolves; this module only explains and manages
- * that state. It never touches the credential value.
+ * This module never touches credential values; sign-in state comes from the
+ * singleton store.
  */
 import { rt } from './runtime.js';
 import { state } from './state.js';
@@ -20,8 +19,8 @@ import { useLocalized, useNow, useSnapshot } from './hooks.js';
 import { Button, KeyValue, Notice, Spinner } from './ui.js';
 import { countdown, formatDateTime } from './format.js';
 
-/** Family id -> display label shown next to the account identity. */
-const FAMILY_LABELS = Object.freeze({ grok: 'Grok', zai: 'Z.AI' });
+/** Settings namespace of the grok LLM route (the Host module's default). */
+const GROK_SETTINGS_NS = 'llm-grok';
 
 /** createElement shorthand resolved at call time (React is bound after import). */
 function el(type, props, ...children) {
@@ -36,6 +35,18 @@ function text(value) {
 /** Read a nested object safely. */
 function record(value) {
   return value !== null && typeof value === 'object' && !Array.isArray(value) ? value : null;
+}
+
+/** Epoch ms of an ISO/epoch value, else null. */
+function toMs(value) {
+  if (typeof value === 'number' && Number.isFinite(value) && value > 0) {
+    return value < 1e12 ? value * 1000 : value;
+  }
+  if (typeof value === 'string' && value.trim() !== '') {
+    const parsed = Date.parse(value);
+    if (Number.isFinite(parsed)) return parsed;
+  }
+  return null;
 }
 
 /** Status dot element with a tone class. */
@@ -57,55 +68,6 @@ function openUsagePage() {
   return false;
 }
 
-/** Start the OAuth flow and open the relay authorize page in a new tab. */
-function startSignIn(family, setError) {
-  Promise.resolve(state.startLogin({ family }))
-    .then((authorizeUrl) => {
-      if (!text(authorizeUrl)) {
-        setError('error');
-        return;
-      }
-      let opened = null;
-      try {
-        opened = window.open(authorizeUrl, '_blank', 'noopener');
-      } catch {
-        opened = null;
-      }
-      // A blocked window keeps the waiting card's fallback link as the way out.
-      if (opened === null) setError('popup');
-    })
-    .catch(() => {
-      setError('error');
-    });
-}
-
-/** Resolve the inference block from the snapshot (status payload first). */
-function readInference(snap) {
-  return record(snap?.inference) ?? record(record(snap?.overview)?.inference);
-}
-
-/** One localized inference status line. */
-function inferenceCopy(t, inference, config, loggedIn) {
-  const enabled = config?.inferenceEnabled !== false;
-  if (!enabled) return { tone: 'idle', label: t('modelsRow.inferenceDisabled') };
-  if (!loggedIn) return { tone: 'idle', label: t('modelsRow.inferenceNotLoggedIn') };
-  if (inference === null) return { tone: 'idle', label: t('modelsRow.inferencePending') };
-  if (inference.error === 'credentials_unavailable') {
-    return { tone: 'warn', label: t('modelsRow.inferenceUnavailable') };
-  }
-  if (text(inference.error)) {
-    return { tone: 'error', label: t('modelsRow.inferenceFailed') };
-  }
-  if (inference.expiresAt !== null && inference.expiresAt !== undefined) {
-    return {
-      tone: 'success',
-      label: t('modelsRow.inferenceWritten', { ref: text(inference.ref) ? inference.ref : '' }),
-      expiresAt: inference.expiresAt,
-    };
-  }
-  return { tone: 'success', label: t('modelsRow.inferenceWritten', { ref: '' }) };
-}
-
 /**
  * Account row for the Models settings page.
  * @param props - `t` from the slot locale face.
@@ -123,16 +85,13 @@ export function ModelsAccountRow(props) {
 
   const config = record(snap?.config);
   if (config === null) return null;
-  const auth = record(snap?.auth);
   const login = record(snap?.login);
-  const loggedIn = auth?.loggedIn === true;
-  const expired = auth?.loginExpired === true;
-  const pending = login?.state === 'pending' || login?.state === 'starting';
-  const family = text(auth?.family) ? auth.family : (text(config.family) ? config.family : 'grok');
-  const user = record(auth?.user);
-  const inference = readInference(snap);
-  const inferenceInfo = inferenceCopy(t, inference, config, loggedIn);
-  const statusTone = loggedIn ? 'success' : expired ? 'error' : pending ? 'idle' : 'idle';
+  const flow = record(snap?.flow);
+  const loggedIn = snap?.loggedIn === true;
+  const expired = snap?.loginExpired === true;
+  const pending = flow?.state === 'pending' || flow?.state === 'starting';
+  const email = text(login?.email) ? login.email : null;
+  const statusTone = loggedIn ? 'success' : expired ? 'error' : 'idle';
   const statusLabel = loggedIn
     ? t('modelsRow.statusSignedIn')
     : expired
@@ -156,7 +115,28 @@ export function ModelsAccountRow(props) {
       .finally(() => setBusy(false));
   };
 
-  const onSignIn = () => startSignIn(family, (kind) => setFailure(kind));
+  const onSignIn = () => {
+    setBusy(true);
+    setFailure(null);
+    Promise.resolve(state.startLogin())
+      .then((flowStart) => {
+        const url = record(flowStart)
+          ? (text(flowStart.verificationUriComplete) ? flowStart.verificationUriComplete : flowStart.verificationUri)
+          : null;
+        if (text(url)) {
+          try {
+            const opened = window.open(url, '_blank', 'noopener');
+            if (opened === null) setFailure('popup');
+          } catch {
+            setFailure('popup');
+          }
+        } else {
+          setFailure('error');
+        }
+      })
+      .catch(() => setFailure('error'))
+      .finally(() => setBusy(false));
+  };
   const onLogout = () => run(async () => {
     const result = await state.logout();
     setExpanded(false);
@@ -194,22 +174,36 @@ export function ModelsAccountRow(props) {
 
   const detailRows = [];
   if (loggedIn) {
-    if (text(user?.name)) detailRows.push({ label: t('modelsRow.labelAccount'), value: user.name });
-    if (text(user?.email)) detailRows.push({ label: t('modelsRow.labelEmail'), value: user.email });
-    detailRows.push({ label: t('modelsRow.labelFamily'), value: FAMILY_LABELS[family] ?? family });
-    if (Number.isFinite(auth?.loggedInAt)) {
-      detailRows.push({ label: t('modelsRow.labelSignedInAt'), value: formatDateTime(auth.loggedInAt, locale) });
+    if (email !== null) detailRows.push({ label: t('modelsRow.labelEmail'), value: email });
+    const loggedInAt = toMs(login?.loggedInAt);
+    if (loggedInAt !== null) {
+      detailRows.push({ label: t('modelsRow.labelSignedInAt'), value: formatDateTime(loggedInAt, locale) });
+    }
+    const expiresAt = toMs(login?.expiresAt);
+    if (expiresAt !== null) {
+      detailRows.push({
+        label: t('modelsRow.labelExpiresAt'),
+        value: el('span', { className: 'grk-models-expiry' },
+          formatDateTime(expiresAt, locale),
+          el('span', { className: 'grk-models-expiry-countdown' },
+            expiresAt > now ? countdown(expiresAt, t, now) : t('modelsRow.expiredHint'))),
+      });
     }
     detailRows.push({
-      label: t('modelsRow.labelInference'),
-      value: el('span', { className: `grk-models-inference grk-models-inference-${inferenceInfo.tone}` },
-        dot(inferenceInfo.tone),
-        inferenceInfo.label,
-        Number.isFinite(inferenceInfo.expiresAt)
-          ? el('span', { className: 'grk-models-inference-expiry' }, countdown(inferenceInfo.expiresAt, t, now))
-          : null),
+      label: t('modelsRow.labelWebSearch'),
+      value: el('span', { className: `grk-models-inference grk-models-inference-${config.webSearchEnabled !== false ? 'success' : 'idle'}` },
+        dot(config.webSearchEnabled !== false ? 'success' : 'idle'),
+        config.webSearchEnabled !== false
+          ? t('modelsRow.webSearchOn', { model: text(config.searchModel) ? config.searchModel : 'grok-4.6' })
+          : t('modelsRow.webSearchOff')),
     });
   }
+
+  const authorizeUrl = pending && record(flow)
+    ? (text(flow.verificationUriComplete) ? flow.verificationUriComplete : flow.verificationUri)
+    : null;
+  const flowCode = pending && record(flow) && text(flow.userCode) ? flow.userCode : null;
+  const flowExpiresAt = pending ? toMs(flow?.expiresAt) : null;
 
   return el('div', { className: 'grk-models-row' },
     el('div', { className: 'grk-models-head' },
@@ -221,12 +215,17 @@ export function ModelsAccountRow(props) {
           dot(statusTone),
           statusLabel)),
       el('span', { className: 'grk-models-actions' }, actions)),
-    pending && text(login?.authorizeUrl)
+    pending && authorizeUrl !== null
       ? el('div', { className: 'grk-models-waiting' },
-          el('span', null, t('modelsRow.waitingHint')),
+          flowCode !== null
+            ? el('span', null, t('modelsRow.waitingHint'), ' ', el('code', { className: 'grk-models-code' }, flowCode))
+            : el('span', null, t('modelsRow.waitingHint')),
+          flowExpiresAt !== null
+            ? el('span', null, t('modelsRow.codeExpires', { time: countdown(flowExpiresAt, t, now) }))
+            : null,
           el('a', {
             className: 'grk-models-link',
-            href: login.authorizeUrl,
+            href: authorizeUrl,
             target: '_blank',
             rel: 'noopener noreferrer',
           }, t('modelsRow.actionOpenAuthorization')))
@@ -250,72 +249,41 @@ export function ModelsAccountRow(props) {
       : null);
 }
 
-/** Inline Grok marks used by the account row (currentColor for the body). */
+/** Inline Grok spark mark used by the account row (currentColor for the body). */
 function renderGlyph() {
   return el('svg', { viewBox: '0 0 20 20', width: 18, height: 18, fill: 'none', xmlns: 'http://www.w3.org/2000/svg' },
     el('rect', { x: 1.2, y: 1.2, width: 17.6, height: 17.6, rx: 4.4, stroke: 'currentColor', strokeWidth: 1.3, opacity: 0.75 }),
-    el('rect', { x: 5, y: 5.4, width: 10, height: 2.2, rx: 1.1, fill: 'currentColor' }),
-    el('rect', { x: 5, y: 8.9, width: 7.4, height: 2.2, rx: 1.1, fill: 'currentColor', opacity: 0.78 }),
-    el('rect', { x: 5, y: 12.4, width: 5, height: 2.2, rx: 1.1, fill: 'currentColor', opacity: 0.56 }),
+    el('path', {
+      d: 'M10 5.2 L11.15 8.85 L14.8 10 L11.15 11.15 L10 14.8 L8.85 11.15 L5.2 10 L8.85 8.85 Z',
+      fill: 'currentColor',
+    }),
     el('circle', { cx: 15.5, cy: 15.2, r: 2.5, fill: 'var(--dsw-alias-state-success-primary)' }));
 }
 
 /**
- * Credential note rendered inside one pi-ai provider card.
- * @param props - `t`, plus the slot's owner props `provider`, `configured`, `keyConfigured`.
- * @returns the note element, or null when the card is not a coding-plan route.
+ * One-line note rendered inside the Grok provider card.
+ * @param props - `t`, plus the slot's owner props carrying the route entry.
+ * @returns the note element, or null when the card is not the grok route.
  */
-export function ProviderCredentialNote(props) {
+export function GrokProviderNote(props) {
   const { t, provider } = props ?? {};
   const snap = useSnapshot();
-  const [failure, setFailure] = rt.React.useState(null);
   const config = record(snap?.config);
   if (config === null) return null;
   const entry = record(provider);
   const providerId = text(entry?.provider) ? entry.provider : text(entry?.id) ? entry.id : '';
-  if (providerId === '') return null;
-  // Gate on the route's own identity, never on the composer widget's
-  // `providerIds` list: that list configures the widget only, and an empty one
-  // must not claim that every provider's API key is Grok-provisioned.
-  const routeDefaultBase = text(entry?.defaultBaseURL) ? entry.defaultBaseURL : '';
-  const codingPlanRoute = providerId === 'zai-coding-cn'
-    || providerId === 'zai'
-    || routeDefaultBase.includes('open.grok.cn/api/coding')
-    || routeDefaultBase.includes('api.z.ai/api/coding');
-  if (!codingPlanRoute) return null;
-
-  const auth = record(snap?.auth);
-  const loggedIn = auth?.loggedIn === true;
-  const login = record(snap?.login);
-  const pending = login?.state === 'pending' || login?.state === 'starting';
-  const inference = readInference(snap);
-  const written = loggedIn && inference !== null && !text(inference.error);
-
-  if (written) {
-    return el('p', { className: 'grk-models-note' },
-      dot('success'),
-      el('span', null, t('modelsRow.noteManaged', { ref: text(inference.ref) ? inference.ref : '' })));
-  }
-  if (pending) {
-    return el('p', { className: 'grk-models-note' }, dot('idle'), el('span', null, t('modelsRow.notePending')));
-  }
+  // Gate on the route's own identity; other providers' cards stay untouched.
+  if (providerId !== 'grok') return null;
+  const loggedIn = snap?.loggedIn === true;
   return el('p', { className: 'grk-models-note' },
-    dot(loggedIn ? 'warn' : 'idle'),
-    el('span', null, t('modelsRow.noteSignIn')),
-    el('button', {
-      type: 'button',
-      className: 'grk-models-inline-action',
-      onClick: () => startSignIn(text(config.family) ? config.family : 'grok', setFailure),
-    }, t('modelsRow.actionLogin')),
-    failure !== null
-      ? el('span', { className: 'grk-models-note-error' }, t(failure === 'popup' ? 'modelsRow.popupBlocked' : 'modelsRow.errorGeneric'))
-      : null);
+    dot(loggedIn ? 'success' : 'idle'),
+    el('span', null, t('modelsRow.note')));
 }
 
 /** zh dictionary of the Models-page integration. */
 const zh = {
   'modelsRow.title': 'Grok 账号',
-  'modelsRow.tag': 'OAuth',
+  'modelsRow.tag': '订阅登录',
   'modelsRow.statusSignedIn': '已登录',
   'modelsRow.statusSignedOut': '未登录',
   'modelsRow.statusExpired': '登录已过期',
@@ -324,28 +292,23 @@ const zh = {
   'modelsRow.actionClose': '收起',
   'modelsRow.actionLogin': '登录 Grok',
   'modelsRow.actionCancel': '取消',
-  'modelsRow.actionOpenUsage': '打开用量统计',
+  'modelsRow.actionOpenUsage': '打开用量页面',
   'modelsRow.actionLogout': '退出登录',
   'modelsRow.actionConfirmLogout': '确认退出',
   'modelsRow.actionOpenAuthorization': '打开授权页面',
-  'modelsRow.labelAccount': '账号',
   'modelsRow.labelEmail': '邮箱',
-  'modelsRow.labelFamily': '服务族',
   'modelsRow.labelSignedInAt': '登录时间',
-  'modelsRow.labelInference': '模型推理凭证',
-  'modelsRow.inferenceWritten': '已自动配置{ref}',
-  'modelsRow.inferenceDisabled': '未启用',
-  'modelsRow.inferenceNotLoggedIn': '等待登录',
-  'modelsRow.inferencePending': '正在获取',
-  'modelsRow.inferenceUnavailable': '凭证服务不可用',
-  'modelsRow.inferenceFailed': '自动配置失败',
-  'modelsRow.waitingHint': '请在新标签页完成 Grok 授权；成功后会自动写入模型推理凭证。',
-  'modelsRow.logoutConfirm': '退出登录会删除插件写入的模型推理凭证，确定？',
-  'modelsRow.hintNoKey': '该供应商的 API 密钥由 Grok OAuth 登录自动提供，无需手动粘贴。',
-  'modelsRow.hintLogout': '退出登录会删除插件写入的凭证；如果配置过环境变量回退，它会重新生效。',
-  'modelsRow.noteManaged': '模型推理凭证由 Grok OAuth 自动提供{ref}',
-  'modelsRow.notePending': '正在等待浏览器授权，完成后自动写入凭证。',
-  'modelsRow.noteSignIn': '登录 Grok 后自动提供模型推理凭证，无需粘贴密钥。',
+  'modelsRow.labelExpiresAt': '过期时间',
+  'modelsRow.labelWebSearch': '网页搜索',
+  'modelsRow.webSearchOn': '已启用（{model}）',
+  'modelsRow.webSearchOff': '未启用',
+  'modelsRow.expiredHint': '已过期',
+  'modelsRow.waitingHint': '请在授权页面输入确认码：',
+  'modelsRow.codeExpires': '确认码 {time}后过期',
+  'modelsRow.logoutConfirm': '退出登录后模型请求将改用 API key（若有），确定？',
+  'modelsRow.hintNoKey': '订阅登录即覆盖推理与搜索，无需 API key。',
+  'modelsRow.hintLogout': '退出后可随时重新登录恢复。',
+  'modelsRow.note': '订阅登录即覆盖推理与搜索，无需 API key。',
   'modelsRow.popupBlocked': '浏览器拦截了授权窗口，请使用上方授权链接或允许弹窗后重试。',
   'modelsRow.errorGeneric': '操作失败，请稍后重试。',
 };
@@ -353,37 +316,32 @@ const zh = {
 /** en dictionary of the Models-page integration. */
 const en = {
   'modelsRow.title': 'Grok account',
-  'modelsRow.tag': 'OAuth',
+  'modelsRow.tag': 'Subscription',
   'modelsRow.statusSignedIn': 'Signed in',
   'modelsRow.statusSignedOut': 'Not signed in',
   'modelsRow.statusExpired': 'Sign-in expired',
-  'modelsRow.statusPending': 'Waiting for browser sign-in…',
+  'modelsRow.statusPending': 'Waiting for browser authorization…',
   'modelsRow.actionEdit': 'Edit',
   'modelsRow.actionClose': 'Close',
   'modelsRow.actionLogin': 'Sign in to Grok',
   'modelsRow.actionCancel': 'Cancel',
-  'modelsRow.actionOpenUsage': 'Open usage statistics',
+  'modelsRow.actionOpenUsage': 'Open usage page',
   'modelsRow.actionLogout': 'Sign out',
   'modelsRow.actionConfirmLogout': 'Confirm sign out',
   'modelsRow.actionOpenAuthorization': 'Open authorization page',
-  'modelsRow.labelAccount': 'Account',
   'modelsRow.labelEmail': 'Email',
-  'modelsRow.labelFamily': 'Provider family',
   'modelsRow.labelSignedInAt': 'Signed in',
-  'modelsRow.labelInference': 'Model inference credential',
-  'modelsRow.inferenceWritten': 'Provisioned automatically{ref}',
-  'modelsRow.inferenceDisabled': 'Disabled',
-  'modelsRow.inferenceNotLoggedIn': 'Waiting for sign-in',
-  'modelsRow.inferencePending': 'Fetching',
-  'modelsRow.inferenceUnavailable': 'Credential service unavailable',
-  'modelsRow.inferenceFailed': 'Automatic setup failed',
-  'modelsRow.waitingHint': 'Finish the Grok authorization in the new tab; the model-inference credential is written automatically afterwards.',
-  'modelsRow.logoutConfirm': 'Signing out removes the model-inference credential this plugin wrote. Continue?',
-  'modelsRow.hintNoKey': "This provider's API key is provisioned automatically by the Grok OAuth sign-in; no manual key is needed.",
-  'modelsRow.hintLogout': 'Signing out removes the credential this plugin wrote; an environment-variable fallback becomes effective again if one is configured.',
-  'modelsRow.noteManaged': 'Model inference credential is provisioned automatically by the Grok OAuth sign-in{ref}',
-  'modelsRow.notePending': 'Waiting for the browser sign-in; the credential is written automatically afterwards.',
-  'modelsRow.noteSignIn': 'Sign in to Grok to provision the model-inference credential automatically; no key paste is needed.',
+  'modelsRow.labelExpiresAt': 'Expires',
+  'modelsRow.labelWebSearch': 'Web search',
+  'modelsRow.webSearchOn': 'Enabled ({model})',
+  'modelsRow.webSearchOff': 'Disabled',
+  'modelsRow.expiredHint': 'Expired',
+  'modelsRow.waitingHint': 'Enter this confirmation code on the authorization page:',
+  'modelsRow.codeExpires': 'Code expires in {time}',
+  'modelsRow.logoutConfirm': 'After signing out, model requests fall back to an API key (if any). Continue?',
+  'modelsRow.hintNoKey': 'The subscription sign-in covers inference and search; no API key is needed.',
+  'modelsRow.hintLogout': 'You can sign in again any time to restore it.',
+  'modelsRow.note': 'The subscription sign-in covers inference and search; no API key is needed.',
   'modelsRow.popupBlocked': 'The browser blocked the authorization window; use the authorization link above or allow pop-ups and retry.',
   'modelsRow.errorGeneric': 'The action failed; try again later.',
 };
@@ -411,6 +369,7 @@ export const modelsRowCss = `
 .grk-models-actions{display:inline-flex;align-items:center;gap:8px;margin-left:auto;flex:none}
 .grk-models-pending{display:inline-flex;align-items:center;gap:6px;font-size:13px;color:var(--dsw-alias-label-secondary)}
 .grk-models-waiting{display:flex;flex-wrap:wrap;align-items:center;gap:8px;font-size:13px;line-height:20px;color:var(--dsw-alias-label-secondary)}
+.grk-models-code{padding:1px 8px;border-radius:6px;background:var(--dsw-alias-bg-layer-2);font-family:var(--dsw-font-family-mono,monospace);font-size:14px;letter-spacing:.08em;color:var(--dsw-alias-label-primary)}
 .grk-models-link{color:var(--dsw-alias-link);text-decoration:none}
 .grk-models-link:hover{text-decoration:underline}
 .grk-models-details{display:flex;flex-direction:column;gap:10px;padding-top:10px;border-top:.5px solid var(--dsw-alias-border-l1)}
@@ -418,16 +377,12 @@ export const modelsRowCss = `
 .grk-models-hint-muted{color:var(--dsw-alias-label-tertiary,var(--dsw-alias-label-secondary))}
 .grk-models-detail-actions{display:flex;flex-wrap:wrap;align-items:center;gap:8px}
 .grk-models-confirm{display:inline-flex;flex-wrap:wrap;align-items:center;gap:8px;font-size:13px;color:var(--dsw-alias-state-error-primary)}
+.grk-models-expiry{display:inline-flex;flex-wrap:wrap;align-items:baseline;gap:6px}
+.grk-models-expiry-countdown{color:var(--dsw-alias-label-secondary);font-size:12px}
 .grk-models-inference{display:inline-flex;flex-wrap:wrap;align-items:center;gap:6px}
 .grk-models-inference-success{color:var(--dsw-alias-state-success-primary)}
-.grk-models-inference-warn{color:var(--dsw-alias-state-warn-primary)}
-.grk-models-inference-error{color:var(--dsw-alias-state-error-primary)}
 .grk-models-inference-idle{color:var(--dsw-alias-label-secondary)}
-.grk-models-inference-expiry{color:var(--dsw-alias-label-secondary);font-size:12px}
 .grk-models-note{display:flex;flex-wrap:wrap;align-items:center;gap:6px;margin:0;padding-top:2px;font-size:12px;line-height:18px;color:var(--dsw-alias-label-secondary)}
-.grk-models-inline-action{padding:0;border:none;background:none;font:inherit;font-size:12px;color:var(--dsw-alias-link);cursor:pointer}
-.grk-models-inline-action:hover{text-decoration:underline}
-.grk-models-note-error{flex-basis:100%;color:var(--dsw-alias-state-error-primary)}
 @media (max-width:560px){
   .grk-models-row{padding:10px 12px}
   .grk-models-head{flex-wrap:wrap}
