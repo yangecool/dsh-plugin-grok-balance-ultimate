@@ -1,7 +1,7 @@
 {
   "name": "dsh-plugin-grok-balance-ultimate",
-  "version": "1.1.1",
-  "description": "Grok Coding Plan quota and usage for the DeepSeek Harness Web GUI: Grok OAuth login, a remaining-quota popover at the composer, and a dedicated usage statistics page.",
+  "version": "0.1.0",
+  "description": "Grok subscription for the DeepSeek Harness Web GUI: xAI OAuth device login, a usage page over the grok billing surfaces, subscription web search, and the Grok LLM route — no API key needed.",
   "type": "module",
   "main": "lib/index.js",
   "exports": {
@@ -27,12 +27,10 @@
     "dsh-plugin",
     "deepseek-harness",
     "grok",
-    "zhipu",
-    "glm",
-    "coding-plan",
-    "quota",
+    "xai",
+    "subscription",
     "usage",
-    "balance"
+    "web-search"
   ],
   "license": "MIT",
   "scripts": {
