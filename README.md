@@ -3,45 +3,34 @@
 [English](#english) | [中文](#中文)
 
 <a id="english"></a>
-Grok Coding Plan quota and usage for the DeepSeek Harness Web GUI — an
-upgraded, ZCode-parity port of `dsh-plugin-glm-balance`.
+Grok subscription integration for the DeepSeek Harness Web GUI: sign in with
+your xAI account, watch usage on a dedicated page, search the web through the
+subscription, and chat with Grok models — no API key pasted anywhere.
 
-It signs in to Grok with OAuth, shows the remaining Coding Plan quota in a
-composer popover, opens a dedicated usage statistics page, and — the part that
-removes the last manual step — writes the Coding Plan project token into the
-DeepSeek Harness credential store so model inference works **without pasting an
-API key**; the same login provisions the Models provider row, so the Coding
-Plan models are selectable immediately.
+## What it does
 
-## Why this exists
-
-The previous `dsh-plugin-glm-balance` widget required an `authorization` header
-copied from the browser devtools and refreshed nothing; it also could not show
-subscription state, reset chances, or usage statistics. This plugin ports
-ZCode's Coding Plan capability set:
-
-- **OAuth login** through the ZCode CLI login relay (device-style polling flow;
-  no redirect URI registration, no copied headers).
-- **Automatic model-inference sign-in**: after login the Host half issues the
-  Coding Plan project access token and stores it under the credential reference
-  that the `zai-coding-cn` pi-ai route resolves, then renews it before expiry.
-  Select a model from that provider and chat — no key prompt.
-- **Composer remaining-quota popover**: two side-by-side progress rings (the
-  5-hour and the weekly window; theme-colored for light and dark mode) at the
-  composer open a floating card with the remaining percentages, reset
-  countdowns, today's tokens/calls, remaining reset chances, and shortcuts to
-  the full page.
-- **Dedicated usage statistics page** (sidebar panel):
-  subscription card, quota cards per window, reset chances, range-switched
-  usage statistics (tokens, calls, credits, cache hit ratio, streak, peak day),
-  an inline SVG trend chart, per-model breakdown, and MCP/tool usage.
-- **Models settings integration**: an account row at the bottom of Settings →
-  Models (identity, sign-in status, edit/sign-out, account and credential
-  details) plus a note inside each coding-plan provider card saying its API key
-  is provisioned by the OAuth sign-in — matching how the built-in account row
-  presents itself.
-- **Own settings** on the page: provider family, refresh interval, provider gate
-  list, inference credential reference.
+- **OAuth login** through the xAI device flow (`auth.x.ai`): click **Sign in
+  to Grok**, approve in the browser tab, done. The login is stored in the
+  grok-build-compatible `~/.grok/auth.json` (one scope; other scopes are left
+  untouched), so the native Grok CLI and this plugin share one session.
+- **Usage page** (sidebar entry) over the same account surfaces grok-build
+  reads: credit-usage percent, the current billing period with a reset
+  countdown, prepaid balance, per-cycle history, the auto top-up rule, and
+  the active subscription tier.
+- **Composer credit ring**: one compact ring on the conversation composer
+  shows the remaining credit for Grok-model sessions; the popover adds the
+  period countdown, balance, and links to the page and the SuperGrok console.
+- **Grok LLM route**: after sign-in the `grok` provider offers `grok-4.6` and
+  `grok-4.5` (500k context) in the Models page — inference rides the
+  subscription token (`cli-chat-proxy.grok.com`), refreshed in the
+  background. An API-key mode (`XAI_API_KEY`) remains available.
+- **Subscription web search**: registers a `grok` web-search provider on the
+  harness web seam. On Grok-model sessions, `web_search` runs through the
+  subscription (server-side `web_search` tool with citations) instead of
+  failing on a missing DeepSeek API key.
+- **Models settings row**: a **Grok account** row at the bottom of
+  Settings → Models mirrors the DeepSeek account row — sign-in state, account
+  e-mail, expiry, sign-out.
 
 ## Install
 
@@ -49,280 +38,151 @@ ZCode's Coding Plan capability set:
 dsh plugin --profile web add /absolute/path/to/dsh-plugin-grok-balance-ultimate
 ```
 
-Then reload the Web GUI page. A new sidebar icon and a Settings page appear.
-The Host half registers same-origin routes under `/grok-balance` on the
-running Web server.
-
-Uninstall:
-
-1. Sign out on the plugin page first. This unsets the model-inference credential
-   the plugin wrote (`ZAI_CODING_CN_API_KEY` by default) and deletes the login
-   file `$DSH_HOME/grok-balance-auth.json`.
-2. Remove the bundle:
-
-```sh
-dsh plugin --profile web remove dsh-plugin-grok-balance-ultimate
-```
-
-DSH has no uninstall callback, so the plugin cannot clean up after its own
-removal. If you remove it without signing out first, delete
-`$DSH_HOME/grok-balance-auth.json` and remove the stored
-`inferenceCredentialRef` value from the credential store (for example by
-clearing the provider key in Settings → Models, which unsets that reference).
+Refresh the Web GUI (F5) after installing; the sidebar entry **Grok usage**
+appears.
 
 ## First-time setup
 
 1. Open the sidebar page **Grok usage**.
-2. Click **Sign in to Grok**. A new browser tab opens the Grok login
-   page; finish the login there.
-3. The plugin page switches to the dashboard automatically. Subscription,
-   quota windows, reset chances, and usage statistics load immediately.
-4. Model inference is signed in at the same time: the plugin writes the issued
-   Coding Plan project token into the credential reference configured under
-   **Model inference** (default `ZAI_CODING_CN_API_KEY`). Settings → Models now
-   shows a **Grok account** row with the sign-in state and a note inside the
-   coding-plan provider card. The shipped
-   `zai-coding-cn` provider route (endpoint
-   `https://open.grok.cn/api/coding/paas/v4`) resolves that reference on
-   every call, so choosing one of its models now works without a pasted key.
-
-The token is renewed in the background before it expires; a DSH restart re-issues
-it from the stored login.
+2. Click **Sign in to Grok**. A new browser tab opens the xAI consent page;
+   the page shows the confirmation code and a countdown while the Host polls.
+3. The page switches to the dashboard: tier, credit percent, period, balance,
+   and history load immediately. The Grok provider appears on the Models page
+   and is usable without any key.
 
 ## Configuration
 
-The plugin persists two files in the Harness home (`$DSH_HOME`, default `~/.dsh`):
+Persisted in `$DSH_HOME/grok-balance.json`; editable from the page's settings
+card.
 
-| File | Contents |
-| --- | --- |
-| `grok-balance.json` | Non-secret settings (`0600`) |
-| `grok-balance-auth.json` | OAuth tokens, account info, key location, inference bookkeeping (`0600`) |
-
-Settings (`Settings` card on the page, or edit the JSON while DSH is stopped):
-
-```json
-{
-  "family": "grok",
-  "refreshMinutes": 30,
-  "providerIds": ["zai-coding-cn"],
-  "showIndicatorWhenLoggedOut": false,
-  "usagePageUrl": "",
-  "inferenceEnabled": true,
-  "inferenceCredentialRef": "ZAI_CODING_CN_API_KEY",
-  "autoCreateProvider": true
-}
-```
-
-- `family` — `grok` (grok.cn) or `zai` (api.z.ai). Personal plans only.
-- `refreshMinutes` — automatic refresh of the quota overview, 1–1440.
-- `providerIds` — show the composer widget only for these model-provider ids.
-  The default `zai-coding-cn` is the shipped pi-ai route for Grok Coding
-  Plan (endpoint `open.grok.cn/api/coding/paas/v4`); add ids of custom
-  routes if you declare one. An empty list shows the widget for every provider
-  (not recommended: DeepSeek sessions would show Grok quota). When the model
-  directory service is unavailable the widget stays visible.
-- `showIndicatorWhenLoggedOut` — render a quiet sign-in chip instead of hiding
-  the widget while signed out.
-- `inferenceEnabled` / `inferenceCredentialRef` — the model-inference sign-in
-  described above. Set the reference to whatever the pi-ai provider profile
-  names in its `apiKeyEnv`.
-- `autoCreateProvider` — on login, write the minimal `llm-pi-ai` provider
-  profile (`zai-coding-cn` for Grok, `zai` for Z.AI) so the route's models
-  appear in the picker without a hand-created provider row. A route any layer
-  already configures is never touched, and sign-out removes the row only while
-  it still holds exactly what this plugin wrote.
+| Key | Default | Meaning |
+| --- | --- | --- |
+| `refreshMinutes` | `30` | Background usage refresh interval. |
+| `showIndicatorWhenLoggedOut` | `false` | Keep the composer ring mounted while signed out. |
+| `webSearchEnabled` | `true` | Register the `grok` web-search provider. |
+| `searchModel` | `grok-4.6` | Model used for the auxiliary search request. |
 
 ## How it works
 
-- **Login**: the Host half calls the ZCode CLI OAuth relay
-  (`POST https://zcode.z.ai/api/v1/oauth/cli/init`, then polls
-  `/api/v1/oauth/cli/poll/<flow_id>`). Poll results carry the Grok business
-  token and the ZCode JWT; the probe finishes in the browser, the Host never
-  sees a password.
-- **Authorization chain**: OAuth business token → `customer/getCustomerInfo` →
-  personal organization/project → reuse-or-create the `zcode-api-key` Coding
-  Plan key → project access token (PAT) → `/api/monitor/*` and
-  `/api/biz/subscription/list` calls with the PAT.
-- **Quota**: `/api/monitor/usage/quota/limit`. A limit's `percentage` is the
-  **used** ratio; the UI inverts it once and shows the remaining share.
-  5-hour window = `unit 3, number 5`; weekly = `unit 6`; monthly tools =
-  `TIME_LIMIT, unit 5, number 1`.
-- **Usage statistics**: `/api/monitor/usage/model-usage`, `tool-usage`,
-  `credit-usage/activity`, `credit-usage/usage-detail`, `model-performance-day`
-  over the selected range in the browser's time zone.
-- **Reset chances**: `/api/v1/coding-plan/reset/status` and `/use` on the ZCode
-  origin. Consuming a reset invalidates the cached quota so the next refresh
-  reflects the refreshed window.
-- **Model inference**: the issued PAT is written with
-  `ctx.credentials.set(ref, token)`; DSH's pi-ai plugin resolves that reference
-  per operation, so renewal reaches the next model call without a restart.
+- The Host half mounts same-origin routes under `/grok-balance` (status,
+  login, login poll, logout, config, overview). Every route re-uses the
+  connection carrier's browser-session gate, so a LAN peer that reaches the
+  port cannot read account data.
+- The OAuth flow follows grok-build's protocol: device code at
+  `/oauth2/device/code`, token polling at the discovery-provided token
+  endpoint, refresh-token rotation inside the final minute of the token TTL,
+  and the `grok-shell/1.0.45` client identity on every upstream call.
+- Account surfaces live on the subscription proxy:
+  `GET /billing?format=credits`, `GET /user?include=subscription`, and
+  `GET /auto-topup-rule`. Responses are normalized defensively; a failing
+  surface never blanks the page, and a total failure serves the last good
+  snapshot marked stale.
+- Web search issues one `POST /responses` request with the server-side
+  `web_search` tool and collects `url_citation` annotations as sources.
 
-## Security
+## Security notes
 
-- The Host routes require the same authenticated browser session as the rest of
-  the Harness UI (the connection carrier's browser cookie plus Host/Origin
-  fence); a LAN peer that merely reaches the port gets 401/403.
-- Tokens are never logged, never enter the session log, and never appear in
-  route responses. Route payloads expose only timestamps and status codes.
-- The auth file is created with mode `0600`; logout unsets the credential the
-  login wrote and deletes the auth file.
-- Sign in replaces whatever value is currently stored under the inference
-  credential reference. If you kept a personal key there, it is not restored on
-  logout (the ambient environment variable becomes effective again).
+- Tokens live in `~/.grok/auth.json` (mode 0600, the same file grok-build
+  uses). They never enter the Harness settings document, a session log, or a
+  plugin route response.
+- Sign out before uninstalling. DSH has no uninstall callback; a removed
+  plugin cannot delete its login. Without a sign-out, remove the plugin's
+  scope entry from `~/.grok/auth.json` manually (or run `grok logout`).
 
 ## Troubleshooting
 
-| Symptom | Meaning |
-| --- | --- |
-| `Sign in` state with "expired" notice | The stored login was rejected (expired/revoked); sign in again. |
-| "No Coding Plan" empty card | The account has no active personal Coding Plan in the selected family. |
-| `Credentials service unavailable` | This Host composition has no `credentials` service; inference sign-in is skipped, quota features keep working. |
-| Widget shows `--` | Quota request failed; open the page for the error and retry, or check the Grok console. |
-| Reset button says retry later | The reset endpoint is throttled (HTTP 429 or business code 3301); wait for the cooldown shown on the card. |
-| Model inference still asks for a key | The pi-ai provider profile's `apiKeyEnv` differs from `inferenceCredentialRef`; set the same reference. |
+- **Login expires repeatedly** — the refresh token rotates on every refresh;
+  if the native Grok CLI is signed in with the same scope, both clients share
+  one login and refresh cooperatively. Signing out in one signs out both.
+- **web_search says insufficient quota** — the subscription covers search;
+  an API-key Grok deployment pays per search. Check the deployment mode.
+- **No usage numbers** — the account surfaces need a Grok subscription
+  (SuperGrok); a plain xAI API-key account has no billing document.
 
 ## Development
 
 ```sh
-npm install --include=dev          # esbuild for the client bundle
-node scripts/build-client.mjs      # src/client -> lib/client.js (committed artifact)
-node --test tests/host/*.test.mjs tests/client/*.test.mjs
+npm install --include=dev
+npm run build:client   # bundle src/client -> lib/client.js (esbuild)
+npm test               # node --test tests/host/*.test.mjs tests/client/*.test.mjs
 ```
-
-Layout: `lib/index.js` is the Host entry; `lib/host/*` holds storage, HTTP,
-OAuth, account/PAT, upstream Grok calls, snapshot caches, route table, and
-inference sign-in. `src/client/*` holds the browser half; `scripts/build-client.mjs`
-bundles it into the single classic script the Harness Client module loader
-executes. `notes/zcode-api-spec.md` documents the upstream protocol with ZCode
-source references, and `tests/fixtures/*` holds sanitized response samples.
 
 ## Known limits
 
-- Personal Coding Plan scope only; team plans, Start plans, and the ZCode
-  MCP quota are out of scope.
-- No OAuth refresh token flow: when the Grok token expires the page asks to
-  sign in again (the project token itself is renewed while the login lasts).
-- The login depends on the ZCode OAuth relay; if the relay changes or rejects
-  third-party clients, sign-in fails with a clear error.
-- Only the Grok/Z.AI families are supported; both share the same UI.
-
-## License
-
-MIT.
-
----
+- Usage data ends where xAI's surfaces end: no per-model breakdown, no MCP
+  or tool usage, no reset-opportunity mechanics (there is nothing to reset).
+- The composer ring shows the credit percent only; Grok has no multi-window
+  quota like the BigModel Coding Plan.
+- API-key inference mode sends a bare `Authorization: Bearer` header; the
+  subscription handshake headers are subscription-only.
 
 <a id="中文"></a>
-DeepSeek Harness Web GUI 的 Grok（智谱）编程套餐额度与用量插件，是
-`dsh-plugin-glm-balance` 的全面升级版，能力对标 ZCode。
+# dsh-plugin-grok-balance-ultimate（中文）
 
-它通过 OAuth 登录 Grok，在输入框浮窗显示编程套餐剩余额度，提供独立的使用统计
-页面，并把编程套餐项目令牌自动写入 DeepSeek Harness 凭证库——**模型推理也一起
-登录，无需再手动粘贴密钥**。
+Grok 订阅集成插件（DeepSeek Harness Web GUI）：用 xAI 账号 OAuth 登录，在独立页面查看用量，用订阅完成联网搜索，直接对话 Grok 模型——全程不需要粘贴任何 API key。
 
 ## 功能
 
-- **OAuth 登录**：走 ZCode CLI 登录中转（轮询式设备登录流程），不需要注册回调
-  地址，也不需要从开发者工具复制请求头。
-- **模型推理自动登录**：登录后插件签发编程套餐项目令牌，写入 pi-ai 路由
-  `zai-coding-cn` 解析的凭证引用（默认 `ZAI_CODING_CN_API_KEY`），并在过期前自动
-  续期。选该供应商的模型直接对话，不再提示输入密钥。
-- **登录自动创建模型供应商**：登录后在 设置 → 模型 里自动写入最小供应商配置
-  （Grok 对应 `zai-coding-cn`，Z.AI 对应 `zai`），其模型立即可选，无需手动创建
-  Provider；退出登录时若该行未被改动会自动移除。
-- **输入框剩余额度浮窗**：输入框右侧两个并排进度圆环（5 小时 / 每周各一环，主题色
-  随明暗模式切换），点开后是浮窗卡片：5 小时 /
-  每周剩余百分比、重置倒计时、今日 tokens 与调用次数、剩余重置机会，以及进入完整
-  统计页的快捷入口。
-- **独立使用统计页**（侧边栏面板）：套餐卡片、各时间窗口额度卡、重置
-  机会、按范围切换的用量统计（tokens、调用、额度、缓存命中率、连续天数、峰值日）、
-  内联 SVG 趋势图、按模型明细与 MCP / 工具用量。
-- **模型设置页集成**：设置 → 模型 底部新增「Grok 账号」横栏（账号、登录状态、
-  编辑/退出登录、凭证详情），并在编程套餐供应商卡片内提示：API 密钥由 OAuth 登录
-  自动提供，无需手动粘贴。
-- **页面内设置**：服务族（Grok / Z.AI）、自动刷新间隔、供应商显示范围、模型
-  推理凭证引用。
+- **OAuth 登录**：走 xAI 设备码流程（`auth.x.ai`），点击「登录 Grok」、在浏览器标签页确认即可。登录写入 grok-build 兼容的 `~/.grok/auth.json`（插件只占一个 scope，其它 scope 原样保留），原生 Grok CLI 与本插件共享同一会话。
+- **用量页**（侧边栏入口）：读取 grok-build 同源的账户接口——额度使用百分比、当前计费周期与重置倒计时、预付费余额、按周期用量历史、自动充值规则、生效的订阅档位。
+- **输入框额度环**：Grok 模型会话的输入框旁一个紧凑圆环显示剩余额度；浮窗补充周期倒计时、余额、页面与 SuperGrok 控制台入口。
+- **Grok 模型路由**：登录后 Models 页出现 `grok` 供应商（`grok-4.6` / `grok-4.5`，50 万上下文）——推理走订阅令牌（`cli-chat-proxy.grok.com`），后台自动刷新；也保留 API key 模式（`XAI_API_KEY`）。
+- **订阅联网搜索**：向 Harness web 接缝注册 `grok` 搜索 provider。Grok 模型会话的 `web_search` 走订阅（服务端 `web_search` 工具 + 引用），不再因缺少 DeepSeek API key 而失败。
+- **模型设置横栏**：设置 → 模型 底部的「Grok 账号」横栏与 DeepSeek 账号横栏同款——登录状态、账号邮箱、有效期、退出登录。
 
 ## 安装
 
 ```sh
-dsh plugin --profile web add /插件目录的绝对路径
+dsh plugin --profile web add /dsh-plugin-grok-balance-ultimate 的绝对路径
 ```
 
-安装后刷新 Web GUI 页面，侧边栏会出现「Grok 用量」入口（设置里只保留
-「模型」页的 Grok 账号横栏，不再重复放置用量页）。
-
-## 卸载
-
-1. 先在插件页面退出登录：这会删除插件写入的模型推理凭证（默认
-   `ZAI_CODING_CN_API_KEY`）与登录文件 `$DSH_HOME/grok-balance-auth.json`。
-2. 再移除插件：
-
-```sh
-dsh plugin --profile web remove dsh-plugin-grok-balance-ultimate
-```
-
-DSH 没有卸载回调，插件无法在自身被移除后清理。若未先退出登录，请手动删除
-`$DSH_HOME/grok-balance-auth.json`，并在凭据存储中移除
-`inferenceCredentialRef` 对应的值（例如在 设置 → 模型 中清除该供应商密钥）。
+安装后刷新 Web GUI（F5），侧边栏出现「Grok 用量」入口。
 
 ## 首次使用
 
 1. 打开侧边栏「Grok 用量」页面。
-2. 点击「登录 Grok」，在新标签页完成 Grok 登录。
-3. 页面自动切换为数据面板，套餐、额度、重置机会与用量统计立即加载。
-4. 模型推理同时完成登录：插件把签发的编程套餐项目令牌写入「模型推理」设置中的
-   凭证引用。DSH 内置的 `zai-coding-cn` 供应商（端点
-   `https://open.grok.cn/api/coding/paas/v4`）每次调用都会解析该引用，因此选择
-   它的模型即可直接对话，无需粘贴密钥。
-
-令牌会在过期前由后台自动续期；DSH 重启后会根据已保存的登录重新签发。
+2. 点击「登录 Grok」，新标签页打开 xAI 确认页；页面显示确认码与倒计时，Host 后台轮询。
+3. 授权后自动进入面板：档位、额度百分比、周期、余额、历史立即加载。Models 页出现 Grok 供应商，无需任何密钥即可选择对话。
 
 ## 配置
 
-插件在 Harness 主目录（`$DSH_HOME`，默认 `~/.dsh`）保存两个文件：
+保存在 `$DSH_HOME/grok-balance.json`，可在页面设置卡片修改。
 
-| 文件 | 内容 |
-| --- | --- |
-| `grok-balance.json` | 非机密设置（`0600`） |
-| `grok-balance-auth.json` | OAuth 令牌、账号信息、Key 位置、推理凭证记录（`0600`） |
+| 键 | 默认 | 含义 |
+| --- | --- | --- |
+| `refreshMinutes` | `30` | 后台用量刷新间隔（分钟）。 |
+| `showIndicatorWhenLoggedOut` | `false` | 未登录时也保留输入框额度环。 |
+| `webSearchEnabled` | `true` | 是否注册 `grok` 联网搜索 provider。 |
+| `searchModel` | `grok-4.6` | 辅助搜索请求使用的模型。 |
 
-配置字段说明：
+## 工作原理
 
-- `family`：`grok`（grok.cn）或 `zai`（api.z.ai），仅支持个人套餐。
-- `refreshMinutes`：额度概览自动刷新间隔（1–1440 分钟）。
-- `providerIds`：仅在这些模型供应商下显示输入框浮窗。默认 `zai-coding-cn`
-  是 DSH 内置的 Grok 编程套餐路由（端点
-  `open.grok.cn/api/coding/paas/v4`）；自建路由可追加自己的 id。空数组表示
-  所有供应商都显示（不建议：DeepSeek 会话也会显示 Grok 额度）。
-- `showIndicatorWhenLoggedOut`：未登录时显示「登录」小徽标而不是隐藏浮窗。
-- `inferenceEnabled` / `inferenceCredentialRef`：模型推理自动登录开关与凭证引用名。
-- `autoCreateProvider`：登录后自动写入 `llm-pi-ai` 的最小供应商配置（Grok 对应
-  `zai-coding-cn`，Z.AI 对应 `zai`），使模型无需手动创建 Provider 即可选；已有配置的
-  路由永不改写，退出登录仅在该行仍与写入内容一致时移除。
+- Host 半边在 `/grok-balance` 下挂同源路由（status、login、login poll、logout、config、overview）。每条路由复用连接层的浏览器会话门禁，局域网内其它设备无法读取账户数据。
+- OAuth 严格遵循 grok-build 协议：`/oauth2/device/code` 申请设备码、discovery 提供的 token 端点轮询、令牌到期前最后一分钟轮换 refresh token、每个上游请求带 `grok-shell/1.0.45` 客户端身份。
+- 账户接口在订阅代理上：`GET /billing?format=credits`、`GET /user?include=subscription`、`GET /auto-topup-rule`。响应做防御式归一化；单个接口失败不会清空页面，整体失败时回退到标记为过期的最后一份好数据。
+- 联网搜索发一次带服务端 `web_search` 工具的 `POST /responses` 请求，从 `url_citation` 注解提取引用来源。
 
-## 工作原理与安全
+## 安全说明
 
-- 登录经 ZCode CLI 中转（`/api/v1/oauth/cli/init` + 轮询 `/poll/<flow_id>`），
-  浏览器完成授权，插件只轮询结果，不接触密码。
-- 授权链：OAuth 业务令牌 → `customer/getCustomerInfo` → 个人机构/项目 →
-  复用或创建 `zcode-api-key` → 项目访问令牌（PAT）→ 查询额度、订阅与用量。
-- 额度接口的 `percentage` 是**已使用**比例，界面统一反转成剩余比例一次。
-- 插件路由复用 Harness 的浏览器会话鉴权：仅能从已登录的 Web 页面访问，局域网内
-  未认证请求返回 401/403。
-- 令牌不写日志、不进会话记录、不出现在接口响应中；认证文件权限 `0600`；退出登录
-  会删除插件写入的凭证并清除认证文件。
-- 登录会覆盖凭证引用下已存在的值；退出登录不会恢复它（环境变量回退会重新生效）。
+- 令牌只存在于 `~/.grok/auth.json`（0600，与 grok-build 同一文件）。不进 Harness 设置文档、不进会话日志、不进插件路由响应。
+- 卸载前先退出登录。DSH 没有卸载回调，插件被移除后无法清理登录；若忘记退出，请手动删除 `~/.grok/auth.json` 中本插件的 scope 条目（或执行 `grok logout`）。
+
+## 故障排查
+
+- **登录频繁过期** —— refresh token 每次刷新都会轮换；若原生 Grok CLI 用同一 scope 登录，两个客户端共享同一登录并协同刷新，一端退出即两端退出。
+- **web_search 提示配额不足** —— 订阅已包含搜索；API key 模式的 Grok 部署按次计费，请检查部署模式。
+- **看不到用量** —— 账户接口需要 Grok 订阅（SuperGrok）；纯 xAI API key 账号没有账单文档。
+
+## 开发
+
+```sh
+npm install --include=dev
+npm run build:client   # 将 src/client 打包为 lib/client.js（esbuild）
+npm test               # node --test tests/host/*.test.mjs tests/client/*.test.mjs
+```
 
 ## 已知限制
 
-- 仅支持个人编程套餐；团队套餐、Start 套餐与 ZCode MCP 额度暂不支持。
-- 没有 OAuth refresh token 流程：Grok 登录令牌过期后需要重新登录（项目令牌
-  在登录有效期内会自动续期）。
-- 登录依赖 ZCode OAuth 中转服务；若中转变更或拒绝第三方客户端，登录会给出明确
-  错误。
-- 仅支持 Grok 与 Z.AI 两个服务族。
-
-## License
-
-MIT。
+- 用量数据止步于 xAI 的接口：没有按模型明细、没有 MCP/工具用量、没有重置机会机制（Grok 没有可重置的额度）。
+- 输入框额度环只显示额度百分比；Grok 没有 BigModel 编程套餐那样的多时间窗配额。
+- API key 推理模式只发裸 `Authorization: Bearer`；订阅握手头仅订阅模式使用。
