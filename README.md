@@ -61,6 +61,7 @@ card.
 | `showIndicatorWhenLoggedOut` | `false` | Keep the composer ring mounted while signed out. |
 | `webSearchEnabled` | `true` | Register the `grok` web-search provider. |
 | `searchModel` | `grok-4.6` | Model used for the auxiliary search request. |
+| `proxyUrl` | `""` | HTTP(S) proxy for all xAI traffic; empty honors the proxy environment. |
 
 ## How it works
 
@@ -154,6 +155,7 @@ dsh plugin --profile web add /dsh-plugin-grok-balance-ultimate 的绝对路径
 | `showIndicatorWhenLoggedOut` | `false` | 未登录时也保留输入框额度环。 |
 | `webSearchEnabled` | `true` | 是否注册 `grok` 联网搜索 provider。 |
 | `searchModel` | `grok-4.6` | 辅助搜索请求使用的模型。 |
+| `proxyUrl` | `""` | xAI 流量的 HTTP(S) 代理；留空时按代理环境变量。 |
 
 ## 工作原理
 
