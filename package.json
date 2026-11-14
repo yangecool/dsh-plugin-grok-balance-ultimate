@@ -38,6 +38,17 @@
     "test": "node --test tests/host/*.test.mjs tests/client/*.test.mjs",
     "check": "node --check lib/index.js && node --check lib/client.js"
   },
+  "dependencies": {
+    "@deepseek-ai/cordis": "^4.1.0",
+    "@deepseek-ai/schemastery": "^3.19.0",
+    "@deepseek-ai/dsh-attachment": "^0.0.1-rc.1",
+    "@deepseek-ai/dsh-credentials": "^0.0.1-rc.1",
+    "@deepseek-ai/dsh-launch-environment": "^0.0.1-rc.3",
+    "@deepseek-ai/dsh-llm": "^0.0.1-rc.1",
+    "@deepseek-ai/dsh-settings": "^0.0.1-rc.1",
+    "@deepseek-ai/dsh-timeout": "^0.0.1-rc.1",
+    "eventsource-parser": "^3.1.0"
+  },
   "devDependencies": {
     "esbuild": "0.28.2"
   },
