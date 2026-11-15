@@ -44,7 +44,7 @@ describe('createLlmModule registration wiring', () => {
       assert.deepEqual(entry.settingsPath, ['providers', 'grok']);
 
       const discovered = await ctx.get('llm').discoverModels('llm-grok', { provider: 'grok' });
-      assert.deepEqual(discovered.map((model) => model.id), ['grok-4.6', 'grok-4.5']);
+      assert.deepEqual(discovered.map((model) => model.id), ['grok-4.7', 'grok-4.7-build-fast', 'grok-4.6', 'grok-4.5']);
 
       const models = await ctx.get('llm').resolveModelInfo('grok', 'grok-4.6');
       assert.equal(models.context.contextWindow, 500_000);

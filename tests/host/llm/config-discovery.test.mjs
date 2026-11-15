@@ -20,16 +20,18 @@ describe('Grok profile resolution', () => {
     assert.equal(subscription.reasoning, 'high');
   });
 
-  it('ships grok-4.6 and grok-4.5 in the built-in catalog', () => {
+  it('ships the current subscription catalog in the built-in catalog', () => {
     const profile = resolveProfiles({ grok: { authMode: 'grok-subscription' } }).get('grok');
     assert.deepEqual(profile.models.map((model) => [model.id, model.name, model.contextWindow]), [
+      ['grok-4.7', 'Grok 4.7', 500_000],
+      ['grok-4.7-build-fast', 'Grok 4.7 Fast', 500_000],
       ['grok-4.6', 'Grok 4.6', 500_000],
       ['grok-4.5', 'Grok 4.5', 500_000],
     ]);
-    const grok46 = profile.models[0];
-    assert.deepEqual([...grok46.reasoningEfforts], ['low', 'medium', 'high', 'xhigh']);
-    assert.deepEqual([...grok46.input], ['text', 'image']);
-    assert.equal(grok46.reasoningSummary, 'concise');
+    const frontier = profile.models[0];
+    assert.deepEqual([...frontier.reasoningEfforts], ['low', 'medium', 'high', 'xhigh']);
+    assert.deepEqual([...frontier.input], ['text', 'image']);
+    assert.equal(frontier.reasoningSummary, 'concise');
   });
 
   it('keeps a declared model table and rejects duplicate ids', () => {
@@ -70,6 +72,8 @@ describe('Grok model discovery', () => {
       throw new Error('the built-in catalog must not reach the network');
     });
     assert.deepEqual(models, [
+      { id: 'grok-4.7', name: 'Grok 4.7', contextWindow: 500_000 },
+      { id: 'grok-4.7-build-fast', name: 'Grok 4.7 Fast', contextWindow: 500_000 },
       { id: 'grok-4.6', name: 'Grok 4.6', contextWindow: 500_000 },
       { id: 'grok-4.5', name: 'Grok 4.5', contextWindow: 500_000 },
     ]);

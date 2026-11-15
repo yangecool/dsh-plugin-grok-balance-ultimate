@@ -20,8 +20,8 @@ subscription, and chat with Grok models — no API key pasted anywhere.
 - **Composer credit ring**: one compact ring on the conversation composer
   shows the remaining credit for Grok-model sessions; the popover adds the
   period countdown, balance, and links to the page and the SuperGrok console.
-- **Grok LLM route**: after sign-in the `grok` provider offers `grok-4.6` and
-  `grok-4.5` (500k context) in the Models page — inference rides the
+- **Grok LLM route**: after sign-in the `grok` provider offers `grok-4.7`,
+  `grok-4.7-build-fast`, `grok-4.6`, and `grok-4.5` (500k context) in the Models page — inference rides the
   subscription token (`cli-chat-proxy.grok.com`), refreshed in the
   background. An API-key mode (`XAI_API_KEY`) remains available.
 - **Subscription web search**: registers a `grok` web-search provider on the
@@ -127,7 +127,7 @@ Grok 订阅集成插件（DeepSeek Harness Web GUI）：用 xAI 账号 OAuth 登
 - **OAuth 登录**：走 xAI 设备码流程（`auth.x.ai`），点击「登录 Grok」、在浏览器标签页确认即可。登录写入 grok-build 兼容的 `~/.grok/auth.json`（插件只占一个 scope，其它 scope 原样保留），原生 Grok CLI 与本插件共享同一会话。
 - **用量页**（侧边栏入口）：读取 grok-build 同源的账户接口——额度使用百分比、当前计费周期与重置倒计时、预付费余额、按周期用量历史、自动充值规则、生效的订阅档位。
 - **输入框额度环**：Grok 模型会话的输入框旁一个紧凑圆环显示剩余额度；浮窗补充周期倒计时、余额、页面与 SuperGrok 控制台入口。
-- **Grok 模型路由**：登录后 Models 页出现 `grok` 供应商（`grok-4.6` / `grok-4.5`，50 万上下文）——推理走订阅令牌（`cli-chat-proxy.grok.com`），后台自动刷新；也保留 API key 模式（`XAI_API_KEY`）。
+- **Grok 模型路由**：登录后 Models 页出现 `grok` 供应商（`grok-4.7` / `grok-4.7-build-fast` / `grok-4.6` / `grok-4.5`，50 万上下文）——推理走订阅令牌（`cli-chat-proxy.grok.com`），后台自动刷新；也保留 API key 模式（`XAI_API_KEY`）。
 - **订阅联网搜索**：向 Harness web 接缝注册 `grok` 搜索 provider。Grok 模型会话的 `web_search` 走订阅（服务端 `web_search` 工具 + 引用），不再因缺少 DeepSeek API key 而失败。
 - **模型设置横栏**：设置 → 模型 底部的「Grok 账号」横栏与 DeepSeek 账号横栏同款——登录状态、账号邮箱、有效期、退出登录。
 
