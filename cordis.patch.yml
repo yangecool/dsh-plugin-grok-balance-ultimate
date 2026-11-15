@@ -1,9 +1,20 @@
 # dsh-plugin-grok-balance-ultimate — bundle patch.
 #
-# The row mounts both halves of the plugin: the Host half (lib/index.js) registers
-# the same-origin Grok OAuth and quota proxy routes on the web server, and the
-# Client half (lib/client.js) registers the sidebar usage page and the composer
-# remaining-quota popover.
+# The row mounts both halves of the plugin: the Host half (lib/index.js)
+# registers the same-origin Grok OAuth and account routes on the web server,
+# the proxy-aware egress, the `grok` LLM route, and the subscription
+# web-search provider; the Client half (lib/client.js) registers the sidebar
+# usage page, the composer credit ring, and the Models account row.
+#
+# `providers.grok` makes the route selectable from the Models page and the
+# model picker: without a configured provider profile no adapter route is
+# registered at all. `grok-subscription` auth rides the shared
+# `~/.grok/auth.json` login, so no API key is involved.
 - insert:
     - id: ui-grok-balance
       name: 'dsh-plugin-grok-balance-ultimate'
+      config:
+        providers:
+          grok:
+            authMode: grok-subscription
+            displayName: Grok
