@@ -257,11 +257,20 @@ test('the search provider serves, owns the grok route, and maps failures', async
   const signedOut = createWebSearch({
     http: createHttp({ fetchImpl: fetcher.fetchImpl }),
     oauth: tokenOAuth(undefined),
-    store: { readLogin: () => null },
+    store: { readLogin: () => null, readConfig: () => ({ webSearchEnabled: true }) },
     now: () => NOW,
   }).provider();
   assert.equal(signedOut.available(), false);
   await assert.rejects(() => signedOut.search({ query: 'x' }), (error) => error.code === 'login_required');
+  // A disabled config keeps the provider unusable at selection time, so a
+  // settings save applies to the next search without re-registration.
+  const disabled = createWebSearch({
+    http: createHttp({ fetchImpl: fetcher.fetchImpl }),
+    oauth: tokenOAuth(),
+    store: loginStore(),
+    now: () => NOW,
+  }).provider({ enabled: () => false });
+  assert.equal(disabled.available(), false);
   for (const line of logger.lines) {
     assert.ok(!line.includes('access-token'), line);
   }
