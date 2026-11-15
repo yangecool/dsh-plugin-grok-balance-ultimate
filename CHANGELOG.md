@@ -26,8 +26,8 @@ against the grok-build 1.0.45 protocol.
   conversations showing the remaining credit, with a popover carrying the
   period countdown, prepaid balance, and links to the page and the SuperGrok
   console.
-- **Grok LLM route**: the `grok` provider (`grok-4.6`, `grok-4.5`, 500k
-  context, Responses API) registered on the `ctx.llm` seam — subscription
+- **Grok LLM route**: the `grok` provider (`grok-4.7`, `grok-4.7-build-fast`,
+  `grok-4.6`, `grok-4.5`, 500k context, Responses API) registered on the `ctx.llm` seam — subscription
   mode rides the shared session against `cli-chat-proxy.grok.com` with the
   full grok-shell identity header set; API-key mode (`XAI_API_KEY`) remains
   available. No credential is ever pasted.
