@@ -46,6 +46,7 @@ export function SettingsCard(props) {
   const [showLoggedOut, setShowLoggedOut] = React.useState(false);
   const [webSearch, setWebSearch] = React.useState(true);
   const [searchModel, setSearchModel] = React.useState('');
+  const [proxyUrl, setProxyUrl] = React.useState('');
   const [saveStatus, setSaveStatus] = React.useState('idle');
   const [refreshInvalid, setRefreshInvalid] = React.useState(false);
 
@@ -57,6 +58,7 @@ export function SettingsCard(props) {
     setShowLoggedOut(config.showIndicatorWhenLoggedOut === true);
     setWebSearch(config.webSearchEnabled !== false);
     setSearchModel(typeof config.searchModel === 'string' ? config.searchModel : '');
+    setProxyUrl(typeof config.proxyUrl === 'string' ? config.proxyUrl : '');
   }, [config]);
 
   React.useEffect(() => {
@@ -82,6 +84,7 @@ export function SettingsCard(props) {
         showIndicatorWhenLoggedOut: showLoggedOut,
         webSearchEnabled: webSearch,
         ...(searchModel.trim() !== '' ? { searchModel: searchModel.trim() } : {}),
+        proxyUrl: proxyUrl.trim(),
       });
       if (result !== null && typeof result === 'object' && result.ok === true) {
         setSaveStatus('saved');
@@ -107,7 +110,8 @@ export function SettingsCard(props) {
     || parsedRefresh.value !== Number(config.refreshMinutes ?? 30)
     || showLoggedOut !== (config.showIndicatorWhenLoggedOut === true)
     || webSearch !== (config.webSearchEnabled !== false)
-    || searchModel.trim() !== (typeof config.searchModel === 'string' ? config.searchModel : '');
+    || searchModel.trim() !== (typeof config.searchModel === 'string' ? config.searchModel : '')
+    || proxyUrl.trim() !== (typeof config.proxyUrl === 'string' ? config.proxyUrl : '');
 
   let feedback = null;
   let feedbackClass = 'grk-page-save-feedback';
@@ -195,6 +199,23 @@ export function SettingsCard(props) {
           },
         })),
       el('p', { className: 'grk-page-field-hint' }, t('settings.searchModelHint'))),
+    el('div', { className: 'grk-page-field' },
+      el('span', { className: 'grk-page-field-label' }, t('settings.proxyLabel')),
+      el('div', { className: 'grk-page-field-controls' },
+        el('input', {
+          className: 'grk-page-input',
+          type: 'text',
+          value: proxyUrl,
+          spellCheck: 'false',
+          autoComplete: 'off',
+          placeholder: 'http://127.0.0.1:7890',
+          'aria-label': t('settings.proxyLabel'),
+          onChange: (event) => {
+            setProxyUrl(eventValue(event));
+            setSaveStatus('idle');
+          },
+        })),
+      el('p', { className: 'grk-page-field-hint' }, t('settings.proxyHint'))),
     el('div', { className: 'grk-page-form-actions' },
       el(Button, { variant: 'primary', size: 'sm', onClick: save, busy: saveStatus === 'saving' },
         t('settings.save')),
