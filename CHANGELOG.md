@@ -31,6 +31,12 @@ against the grok-build 1.0.45 protocol.
   mode rides the shared session against `cli-chat-proxy.grok.com` with the
   full grok-shell identity header set; API-key mode (`XAI_API_KEY`) remains
   available. No credential is ever pasted.
+- **Live model catalog**: the picker merges the account's `/models` listing
+  over the built-in table with a five-minute cache, so newly served models
+  appear without a plugin release.
+- **Teardown gate**: pending device polls and token rotations are cancelled
+  when the plugin unloads and never persist a login afterwards; the web-search
+  model is read per call so a settings save applies to the next search.
 - **Subscription web search**: a `grok` web-search provider on the harness
   web seam (one `/responses` call with the server-side `web_search` tool,
   citations from `url_citation` annotations) that owns Grok-model sessions

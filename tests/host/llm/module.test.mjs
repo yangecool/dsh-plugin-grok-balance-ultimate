@@ -152,4 +152,57 @@ describe('createLlmModule registration wiring', () => {
     const mod = createLlmModule({ oauth: { resolveAccessToken: async () => 'token' } });
     assert.throws(() => mod.apply(ctx, Config({})), /llm service is not mounted/);
   });
+
+  it('merges the live account catalog over the built-in table', async () => {
+    const ctx = await llmContext();
+    try {
+      const calls = [];
+      const fetch = async (url) => {
+        calls.push(String(url));
+        if (String(url).endsWith('/models')) {
+          return Response.json({
+            data: [
+              { id: 'grok-4.8', name: 'Grok 4.8', context_window: 400_000, max_output_tokens: 64_000 },
+              { id: 'grok-4.6', name: 'Grok 4.6 (server)' },
+            ],
+          });
+        }
+        return sseResponse(completedText('unused'));
+      };
+      const mod = createLlmModule({ oauth: { resolveAccessToken: async () => 'token' }, fetch });
+      mod.apply(ctx, Config({ providers: { grok: { authMode: 'grok-subscription' } } }));
+
+      const models = await ctx.get('llm').listModels('grok');
+      assert.deepEqual(models.map((model) => model.id), [
+        'grok-4.7', 'grok-4.7-build-fast', 'grok-4.6', 'grok-4.5', 'grok-4.8',
+      ]);
+
+      const info = await ctx.get('llm').resolveModelInfo('grok', 'grok-4.8');
+      assert.equal(info.context.contextWindow, 400_000);
+      assert.deepEqual(info.reasoning.efforts.map((effort) => effort.id), ['low', 'medium', 'high', 'xhigh']);
+      assert.equal(calls.filter((url) => url.endsWith('/models')).length, 1);
+    } finally {
+      await ctx.fiber.dispose();
+    }
+  });
+
+  it('never extends a declared model table with the live catalog', async () => {
+    const ctx = await llmContext();
+    try {
+      let modelFetches = 0;
+      const fetch = async (url) => {
+        if (String(url).endsWith('/models')) modelFetches += 1;
+        return Response.json({ data: [{ id: 'grok-4.8' }] });
+      };
+      const mod = createLlmModule({ oauth: { resolveAccessToken: async () => 'token' }, fetch });
+      mod.apply(ctx, Config({
+        providers: { grok: { authMode: 'grok-subscription', models: [{ id: 'grok-custom' }] } },
+      }));
+      const models = await ctx.get('llm').listModels('grok');
+      assert.deepEqual(models.map((model) => model.id), ['grok-custom']);
+      assert.equal(modelFetches, 0);
+    } finally {
+      await ctx.fiber.dispose();
+    }
+  });
 });

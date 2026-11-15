@@ -79,7 +79,14 @@ card.
   surface never blanks the page, and a total failure serves the last good
   snapshot marked stale.
 - Web search issues one `POST /responses` request with the server-side
-  `web_search` tool and collects `url_citation` annotations as sources.
+  `web_search` tool and collects `url_citation` annotations as sources; the
+  search model is read per call, so a settings save applies immediately.
+- The model picker merges the account's live `/models` listing over the
+  built-in catalog (five-minute cache, last-good fallback), so a model the
+  service starts serving appears without a plugin release.
+- A device-code poll or token rotation still in flight when the plugin
+  unloads is cancelled instead of persisting a login the dead fiber can no
+  longer own.
 
 ## Security notes
 

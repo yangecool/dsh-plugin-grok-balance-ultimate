@@ -275,3 +275,24 @@ test('the search provider serves, owns the grok route, and maps failures', async
     assert.ok(!line.includes('access-token'), line);
   }
 });
+
+test('the search model is read per request so a settings save applies immediately', async () => {
+  const fetcher = createFetch();
+  fetcher.respond(RESPONSES_URL, () => Response.json({
+    output: [{ content: [{ type: 'output_text', annotations: [
+      { type: 'url_citation', url: 'https://a.example/1', title: 'A' },
+    ] }] }],
+  }));
+  let model = 'grok-4.7';
+  const provider = createWebSearch({
+    http: createHttp({ fetchImpl: fetcher.fetchImpl }),
+    oauth: tokenOAuth(),
+    store: loginStore(),
+    now: () => NOW,
+  }).provider({ searchModel: () => model });
+  await provider.search({ query: 'first' });
+  assert.equal(JSON.parse(fetcher.calls[0].init.body).model, 'grok-4.7');
+  model = 'grok-4.5';
+  await provider.search({ query: 'second' });
+  assert.equal(JSON.parse(fetcher.calls[1].init.body).model, 'grok-4.5');
+});

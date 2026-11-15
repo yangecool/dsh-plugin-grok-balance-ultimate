@@ -467,3 +467,104 @@ test('sanitizeConfig clamps fields and validates identifiers', async () => {
   assert.equal(custom.webSearchEnabled, false);
   assert.equal(custom.searchModel, 'grok-4.5');
 });
+
+test('close() stops an in-flight poll from writing a login', async () => {
+  const logger = createLogger();
+  const { dir, store } = createTempStore(logger);
+  try {
+    const oauthFetch = createOAuthFetch();
+    oauthFetch.respond(DISCOVERY_URL, () => Response.json({ token_endpoint: TOKEN_URL }));
+    oauthFetch.respond(DEVICE_URL, () => Response.json({
+      device_code: 'dev-close',
+      user_code: 'GROK-CLS',
+      verification_uri: 'https://auth.x.ai/device',
+      expires_in: 900,
+      interval: 1,
+    }));
+    let release;
+    const gate = new Promise((resolve) => { release = resolve; });
+    oauthFetch.respond(TOKEN_URL, async () => {
+      await gate;
+      return Response.json({
+        access_token: 'late-access',
+        refresh_token: 'late-refresh',
+        expires_in: 3600,
+        id_token: encodeJwt({ sub: 'user-late', email: 'late@example.test' }),
+      });
+    });
+    const oauth = createOAuth({
+      http: createHttp({ fetchImpl: oauthFetch.fetchImpl }),
+      store,
+      logger,
+      now: () => NOW,
+      sleep: async () => {},
+    });
+    const flow = await oauth.start();
+    // Let the detached poll reach the in-flight token request.
+    for (let index = 0; index < 10 && !oauthFetch.calls.some((call) => call.url === TOKEN_URL); index += 1) {
+      await new Promise((resolve) => setImmediate(resolve));
+    }
+    oauth.close();
+    release();
+    await new Promise((resolve) => setImmediate(resolve));
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.equal(store.readLogin(), null, 'a closed controller must not persist the late login');
+    assert.equal(oauth.status(flow.flowId).status, 'error');
+    assert.equal(oauth.status(flow.flowId).error, 'cancelled');
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('close() drops an in-flight token rotation', async () => {
+  const logger = createLogger();
+  const { dir, store } = createTempStore(logger);
+  try {
+    const oauthFetch = createOAuthFetch();
+    oauthFetch.respond(DISCOVERY_URL, () => Response.json({ token_endpoint: TOKEN_URL }));
+    let release;
+    const gate = new Promise((resolve) => { release = resolve; });
+    oauthFetch.respond(TOKEN_URL, async () => {
+      await gate;
+      return Response.json({ access_token: 'rotated-late', refresh_token: 'rotated-refresh', expires_in: 3600 });
+    });
+    const oauth = createOAuth({
+      http: createHttp({ fetchImpl: oauthFetch.fetchImpl }),
+      store,
+      logger,
+      now: () => NOW,
+      sleep: async () => {},
+    });
+    store.writeLoginRecord({
+      key: 'old-access',
+      refresh_token: 'old-refresh',
+      expires_at: new Date(NOW + 10_000).toISOString(),
+    });
+    const resolving = oauth.resolveAccessToken();
+    for (let index = 0; index < 10 && !oauthFetch.calls.some((call) => call.url === TOKEN_URL); index += 1) {
+      await new Promise((resolve) => setImmediate(resolve));
+    }
+    oauth.close();
+    release();
+    assert.equal(await resolving, undefined);
+    assert.equal(store.readLogin().accessToken, 'old-access');
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('start() refuses once the controller is closed', async () => {
+  const { dir, store } = createTempStore(createLogger());
+  try {
+    const oauth = createOAuth({
+      http: createHttp({ fetchImpl: async () => new Response('') }),
+      store,
+      now: () => NOW,
+      sleep: async () => {},
+    });
+    oauth.close();
+    await assert.rejects(() => oauth.start(), (error) => error.code === 'oauth_closed');
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
