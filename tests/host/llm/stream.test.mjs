@@ -196,7 +196,7 @@ describe('Grok direct Responses translation', () => {
       type: 'response.completed',
       response: { id: 'resp_search', output: [{ type: 'web_search_call', id: 'ws_1', status: 'completed', action: { type: 'search', query: 'capybaras' } }] },
     }, '[DONE]']);
-    assert.deepEqual(web.at(-1), { type: 'continue-response', responseId: 'resp_search' });
+    assert.equal(web.at(-1).type, 'finish');
 
     const answered = await collect([{
       type: 'response.completed',
