@@ -191,12 +191,13 @@ describe('Grok direct Responses translation', () => {
     assert.deepEqual(truncated.at(-1).reason, { kind: 'max-tokens', rawReason: 'max_tokens' });
   });
 
-  it('renders hosted web_search, x_search and code_interpreter calls as text', async () => {
+  it('hides hosted calls and continues when a response searched without answering', async () => {
     const web = await collect([{
       type: 'response.completed',
       response: { id: 'resp_search', output: [{ type: 'web_search_call', id: 'ws_1', status: 'completed', action: { type: 'search', query: 'capybaras' } }] },
     }, '[DONE]']);
-    assert.equal(web.at(-1).type, 'finish');
+    assert.deepEqual(web.at(-1), { type: 'continue-response', responseId: 'resp_search' });
+    assert.equal(web.some((chunk) => chunk.type === 'text-delta'), false);
 
     const answered = await collect([{
       type: 'response.completed',
@@ -209,20 +210,8 @@ describe('Grok direct Responses translation', () => {
       },
     }, '[DONE]']);
     assert.equal(answered.at(-1).type, 'finish');
-
-    const x = await collect([{
-      type: 'response.completed',
-      response: { output: [{ type: 'custom_tool_call', id: 'xs_1', status: 'completed', name: 'x_keyword_search', input: '{"query":"grok build"}' }] },
-    }, '[DONE]']);
-    assert.deepEqual(x.find((c) => c.type === 'block-end'),
-      { type: 'block-end', index: 0, block: { type: 'text', text: '[backend x_search] x_keyword_search({"query":"grok build"})' } });
-
-    const code = await collect([{
-      type: 'response.completed',
-      response: { output: [{ type: 'code_interpreter_call', id: 'ci_1', status: 'completed', code: 'print(6 * 7)', outputs: [] }] },
-    }, '[DONE]']);
-    assert.deepEqual(code.find((c) => c.type === 'block-end'),
-      { type: 'block-end', index: 0, block: { type: 'text', text: '[backend code_interpreter] print(6 * 7)' } });
+    assert.deepEqual(answered.find((chunk) => chunk.type === 'block-end' && chunk.block?.type === 'text')?.block,
+      { type: 'text', text: 'done' });
   });
 
   it('holds a later function call until a terminal hosted item fills the output index gap', async () => {
@@ -241,10 +230,34 @@ describe('Grok direct Responses translation', () => {
       },
       '[DONE]',
     ]);
-    assert.deepEqual(chunks.filter((c) => c.type === 'block-start').map((c) => c.index), [0, 1, 2]);
-    assert.deepEqual(chunks.filter((c) => c.type === 'block-end').map((c) => c.index), [0, 1, 2]);
-    assert.deepEqual(chunks.find((c) => c.type === 'block-end' && c.index === 1).block,
-      { type: 'text', text: '[backend web_search] search: replay order' });
+    assert.deepEqual(chunks.filter((c) => c.type === 'block-start').map((c) => c.index), [0, 2]);
+    assert.deepEqual(chunks.find((c) => c.type === 'block-end' && c.index === 2).block,
+      { type: 'tool-call', id: 'call_2', name: 'edit_file', arguments: '{"target":"probe.txt"}' });
+  });
+
+  it('keeps every block paired when a hosted call arrives before earlier slots begin', async () => {
+    const chunks = await collect([
+      { type: 'response.output_item.added', output_index: 0, item: { type: 'reasoning', id: 'r0', status: 'in_progress' } },
+      { type: 'response.output_item.added', output_index: 1, item: { type: 'web_search_call', id: 'ws1', status: 'in_progress' } },
+      { type: 'response.output_item.added', output_index: 2, item: { type: 'message', id: 'm0', role: 'assistant', status: 'in_progress' } },
+      { type: 'response.output_text.delta', output_index: 2, delta: 'answer' },
+      {
+        type: 'response.completed',
+        response: {
+          id: 'resp_pairing',
+          output: [
+            { type: 'reasoning', id: 'r0', status: 'completed', summary: [] },
+            { type: 'web_search_call', id: 'ws1', status: 'completed', action: { type: 'search', query: 'q' } },
+            { type: 'message', role: 'assistant', content: [{ type: 'output_text', text: 'answer' }] },
+          ],
+        },
+      },
+      '[DONE]',
+    ]);
+    const starts = chunks.filter((chunk) => chunk.type === 'block-start').map((chunk) => chunk.index);
+    const ends = chunks.filter((chunk) => chunk.type === 'block-end').map((chunk) => chunk.index);
+    assert.deepEqual(starts, [0, 2]);
+    assert.deepEqual(ends, [0, 2]);
   });
 
   it('refuses unsupported backend items instead of silently losing context', async () => {
