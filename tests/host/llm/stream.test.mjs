@@ -194,10 +194,21 @@ describe('Grok direct Responses translation', () => {
   it('renders hosted web_search, x_search and code_interpreter calls as text', async () => {
     const web = await collect([{
       type: 'response.completed',
-      response: { output: [{ type: 'web_search_call', id: 'ws_1', status: 'completed', action: { type: 'search', query: 'capybaras' } }] },
+      response: { id: 'resp_search', output: [{ type: 'web_search_call', id: 'ws_1', status: 'completed', action: { type: 'search', query: 'capybaras' } }] },
     }, '[DONE]']);
-    assert.deepEqual(web.find((c) => c.type === 'block-end'),
-      { type: 'block-end', index: 0, block: { type: 'text', text: '[backend web_search] search: capybaras' } });
+    assert.deepEqual(web.at(-1), { type: 'continue-response', responseId: 'resp_search' });
+
+    const answered = await collect([{
+      type: 'response.completed',
+      response: {
+        id: 'resp_search',
+        output: [
+          { type: 'web_search_call', id: 'ws_1', status: 'completed', action: { type: 'search', query: 'capybaras' } },
+          { type: 'message', role: 'assistant', content: [{ type: 'output_text', text: 'done' }] },
+        ],
+      },
+    }, '[DONE]']);
+    assert.equal(answered.at(-1).type, 'finish');
 
     const x = await collect([{
       type: 'response.completed',
