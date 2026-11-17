@@ -2,8 +2,7 @@
  * Stream-translation behavior for the Grok Responses adapter.
  *
  * Ported from grok-harness stream.spec.ts, minus fork-private behavior: no
- * doom-loop control or recovery, no replayState envelope on the finish chunk.
- * All cases are offline payload fixtures.
+ * doom-loop control or recovery. All cases are offline payload fixtures.
  */
 import { strict as assert } from 'node:assert';
 import { describe, it } from 'node:test';
@@ -66,7 +65,7 @@ describe('Grok Responses usage mapping', () => {
 });
 
 describe('Grok direct Responses translation', () => {
-  it('translates reasoning, text and usage after DONE without a replay envelope', async () => {
+  it('translates reasoning, text and usage after DONE with aligned replay', async () => {
     const chunks = await collect([
       { type: 'response.reasoning_summary_text.delta', output_index: 0, delta: 'check' },
       { type: 'response.output_text.delta', output_index: 1, delta: 'done' },
@@ -100,8 +99,8 @@ describe('Grok direct Responses translation', () => {
     const finish = chunks.at(-1);
     assert.equal(finish.type, 'finish');
     assert.deepEqual(finish.reason, { kind: 'stop' });
-    // The fork's replayState envelope is deliberately not ported.
-    assert.ok(!('replayState' in finish));
+    assert.deepEqual(finish.replayState.blocks.map((block) => block.type), ['reasoning', 'text']);
+    assert.equal(finish.replayState.response.responseId, 'resp_fixture');
   });
 
   it('recovers a tool name from the terminal response when only argument deltas streamed', async () => {
@@ -124,7 +123,8 @@ describe('Grok direct Responses translation', () => {
         index: 0,
         block: { type: 'tool-call', id: 'call_fixture', name: 'read_file', arguments: '{"path":"README.md"}' },
       });
-    assert.deepEqual(chunks.at(-1), { type: 'finish', reason: { kind: 'tool-calls' } });
+    assert.equal(chunks.at(-1).type, 'finish');
+    assert.deepEqual(chunks.at(-1).reason, { kind: 'tool-calls' });
   });
 
   it('accepts clean EOF after a terminal response when the gateway omits DONE', async () => {
@@ -139,7 +139,9 @@ describe('Grok direct Responses translation', () => {
 
     assert.deepEqual(chunks.find((c) => c.type === 'block-end'),
       { type: 'block-end', index: 0, block: { type: 'text', text: 'complete' } });
-    assert.deepEqual(chunks.at(-1), { type: 'finish', reason: { kind: 'stop' } });
+    assert.equal(chunks.at(-1).type, 'finish');
+    assert.deepEqual(chunks.at(-1).reason, { kind: 'stop' });
+    assert.equal(chunks.at(-1).replayState.response.responseId, 'resp_clean_eof');
   });
 
   for (const [reason, expected] of [
@@ -212,6 +214,64 @@ describe('Grok direct Responses translation', () => {
     assert.equal(answered.at(-1).type, 'finish');
     assert.deepEqual(answered.find((chunk) => chunk.type === 'block-end' && chunk.block?.type === 'text')?.block,
       { type: 'text', text: 'done' });
+  });
+
+  it('appends search citations and replays the search with the reasoning', async () => {
+    const chunks = await collect([{
+      type: 'response.output_text.delta', output_index: 2, delta: '118 yuan',
+    }, {
+      type: 'response.completed',
+      response: {
+        id: 'resp_cited',
+        output: [
+          { type: 'reasoning', id: 'r0', status: 'completed', encrypted_content: 'sealed', summary: [] },
+          { type: 'web_search_call', id: 'ws0', status: 'completed', action: { type: 'search', query: 'price' } },
+          {
+            type: 'message',
+            role: 'assistant',
+            content: [{
+              type: 'output_text',
+              text: '118 yuan',
+              annotations: [
+                { type: 'url_citation', url: 'https://docs.example/plan', title: 'Plan' },
+                { type: 'url_citation', url: 'https://docs.example/plan', title: 'Plan again' },
+              ],
+            }],
+          },
+        ],
+      },
+    }, '[DONE]']);
+    const text = chunks.find((chunk) => chunk.type === 'block-end' && chunk.block?.type === 'text');
+    assert.deepEqual(text.block, { type: 'text', text: '118 yuan\nPlan https://docs.example/plan' });
+    const finish = chunks.at(-1);
+    assert.equal(finish.type, 'finish');
+    assert.deepEqual(finish.replayState.blocks.map((block) => block.type), ['reasoning', 'text']);
+    // The stored item keeps the response-only status; the wire item drops it.
+    assert.equal(finish.replayState.blocks[0].item.encrypted_content, 'sealed');
+    assert.equal(finish.replayState.blocks[0].item.status, 'completed');
+    assert.equal(finish.replayState.blocks[1].hostedBefore[0].type, 'web_search_call');
+    assert.equal(finish.replayState.blocks[1].hostedBefore[0].status, 'completed');
+    assert.equal(finish.replayState.response.responseId, 'resp_cited');
+  });
+
+  it('keeps every hosted call in provider order when one response searches twice', async () => {
+    const chunks = await collect([{
+      type: 'response.completed',
+      response: {
+        id: 'resp_two_searches',
+        output: [
+          { type: 'reasoning', id: 'r0', status: 'completed', encrypted_content: 'sealed', summary: [] },
+          { type: 'web_search_call', id: 'ws1', status: 'completed', action: { type: 'search', query: 'q1' } },
+          { type: 'web_search_call', id: 'ws2', status: 'completed', action: { type: 'search', query: 'q2' } },
+          { type: 'message', role: 'assistant', content: [{ type: 'output_text', text: 'answer' }] },
+        ],
+      },
+    }, '[DONE]']);
+    const finish = chunks.at(-1);
+    assert.equal(finish.type, 'finish');
+    // A hosted call owns no durable block, so both searches ride on the answer.
+    assert.deepEqual(finish.replayState.blocks.map((block) => block.type), ['reasoning', 'text']);
+    assert.deepEqual(finish.replayState.blocks[1].hostedBefore.map((item) => item.id), ['ws1', 'ws2']);
   });
 
   it('holds a later function call until a terminal hosted item fills the output index gap', async () => {

@@ -126,7 +126,8 @@ describe('Grok adapter error plumbing', () => {
     const chunks = [];
     for await (const chunk of adapter.stream(request)) chunks.push(chunk);
     assert.equal(calls[0].url, 'https://example.test/v1/responses');
-    assert.deepEqual(chunks.at(-1), { type: 'finish', reason: { kind: 'stop' } });
+    assert.equal(chunks.at(-1).type, 'finish');
+    assert.deepEqual(chunks.at(-1).reason, { kind: 'stop' });
   });
 
   it('rejects the unsupported stop option and unsupported image input', async () => {

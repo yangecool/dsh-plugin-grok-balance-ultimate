@@ -2,8 +2,8 @@
  * Request-serialization wire golden samples for the Grok Responses adapter.
  *
  * Ported from grok-harness responses-wire.spec.ts, minus fork-private
- * behavior: no prompt_cache_key projection, no encrypted replay state, no
- * permission-auto purpose. All cases are offline.
+ * behavior: no prompt_cache_key projection and no permission-auto purpose.
+ * All cases are offline.
  */
 import { strict as assert } from 'node:assert';
 import { describe, it } from 'node:test';
@@ -40,7 +40,7 @@ describe('Grok Responses request serialization', () => {
 
     assert.deepEqual(body.input, [
       { type: 'message', role: 'system', content: 'be brief' },
-      // Assistant reasoning is dropped: encrypted replay was not ported.
+      // Reasoning without replay metadata has nothing to send back.
       { type: 'message', role: 'assistant', content: 'let me read the file' },
       { type: 'function_call', call_id: 'call_1', name: 'read_file', arguments: '{"path":"README.md"}' },
       { type: 'function_call_output', call_id: 'call_1', output: 'file body' },
@@ -121,6 +121,96 @@ describe('Grok Responses request serialization', () => {
       serializeGrokRequest(options, 'high', undefined, [{ wireName: 'code_interpreter' }]),
       { code: 'UNSUPPORTED_HOSTED_TOOL' },
     );
+  });
+
+  it('replays encrypted reasoning, a hosted search, and the answer it grounded', async () => {
+    const body = await serializeGrokRequest({
+      provider: 'grok',
+      model: 'grok-4.6',
+      messages: [{
+        role: 'assistant',
+        content: [
+          { type: 'reasoning', text: 'thinking about it' },
+          { type: 'text', text: 'the price is 118' },
+        ],
+        source: {
+          kind: 'model',
+          provider: 'grok',
+          model: 'grok-4.6',
+          replayState: {
+            response: { kind: 'grok-build-responses', version: 1, responseId: 'resp_1' },
+            blocks: [
+              { type: 'reasoning', item: { type: 'reasoning', id: 'r0', status: 'completed', encrypted_content: 'sealed' } },
+              { type: 'text', hostedBefore: [{ type: 'web_search_call', id: 'ws0', status: 'completed', action: { type: 'search', query: 'price' } }] },
+            ],
+          },
+        },
+      }, user('and the credits?')],
+    }, 'high');
+    assert.deepEqual(body.input, [
+      { type: 'reasoning', id: 'r0', encrypted_content: 'sealed' },
+      { type: 'web_search_call', id: 'ws0', action: { type: 'search', query: 'price' } },
+      { type: 'message', role: 'assistant', content: 'the price is 118' },
+      { type: 'message', role: 'user', content: 'and the credits?' },
+    ]);
+  });
+
+  it('keeps a hosted call that followed the text after it in provider order', async () => {
+    const body = await serializeGrokRequest({
+      provider: 'grok',
+      model: 'grok-4.6',
+      messages: [{
+        role: 'assistant',
+        content: [
+          { type: 'text', text: 'let me check' },
+          { type: 'tool-call', id: 'call_1', name: 'read_file', arguments: '{"path":"README.md"}' },
+        ],
+        source: {
+          kind: 'model',
+          provider: 'grok',
+          model: 'grok-4.6',
+          replayState: {
+            response: { kind: 'grok-build-responses', version: 1 },
+            blocks: [
+              { type: 'text', hostedAfter: [{ type: 'web_search_call', id: 'ws9' }] },
+              { type: 'tool-call', hostedBefore: [{ type: 'custom_tool_call', id: 'xt1' }] },
+            ],
+          },
+        },
+      }],
+    }, 'high');
+    assert.deepEqual(body.input, [
+      { type: 'message', role: 'assistant', content: 'let me check' },
+      { type: 'web_search_call', id: 'ws9' },
+      { type: 'custom_tool_call', id: 'xt1' },
+      { type: 'function_call', call_id: 'call_1', name: 'read_file', arguments: '{"path":"README.md"}' },
+    ]);
+  });
+
+  it('drops replay owned by another provider instead of sending it', async () => {
+    const body = await serializeGrokRequest({
+      provider: 'grok',
+      model: 'grok-4.6',
+      messages: [{
+        ...assistantTurn,
+        source: {
+          ...assistantTurn.source,
+          provider: 'other',
+          replayState: {
+            response: { kind: 'grok-build-responses', version: 1 },
+            blocks: [
+              { type: 'reasoning', item: { type: 'reasoning', encrypted_content: 'foreign' } },
+              { type: 'text' },
+              { type: 'tool-call' },
+            ],
+          },
+        },
+      }],
+    }, 'high');
+    assert.deepEqual(body.input, [
+      { type: 'message', role: 'assistant', content: 'let me read the file' },
+      { type: 'function_call', call_id: 'call_1', name: 'read_file', arguments: '{"path":"README.md"}' },
+    ]);
   });
 
   it('maps temperature and maxTokens onto the wire fields', async () => {

@@ -36,7 +36,8 @@ const baseRequest = {
 async function headersOf(adapter, request = baseRequest) {
   const chunks = [];
   for await (const chunk of adapter.stream(request)) chunks.push(chunk);
-  assert.deepEqual(chunks.at(-1), { type: 'finish', reason: { kind: 'stop' } });
+  assert.equal(chunks.at(-1).type, 'finish');
+  assert.deepEqual(chunks.at(-1).reason, { kind: 'stop' });
   return chunks;
 }
 
