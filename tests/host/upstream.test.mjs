@@ -271,6 +271,17 @@ test('the search provider serves, owns the grok route, and maps failures', async
     now: () => NOW,
   }).provider({ enabled: () => false });
   assert.equal(disabled.available(), false);
+  // A live session on another model route yields this provider. A Grok
+  // session, or a call with no session route, keeps it.
+  const routed = createWebSearch({
+    http: createHttp({ fetchImpl: fetcher.fetchImpl }),
+    oauth: tokenOAuth(),
+    store: loginStore(),
+    now: () => NOW,
+  });
+  assert.equal(routed.provider({ sessionRoute: () => 'zai-coding-cn' }).available(), false);
+  assert.equal(routed.provider({ sessionRoute: () => 'grok' }).available(), true);
+  assert.equal(routed.provider({ sessionRoute: () => undefined }).available(), true);
   for (const line of logger.lines) {
     assert.ok(!line.includes('access-token'), line);
   }

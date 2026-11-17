@@ -27,7 +27,9 @@ subscription, and chat with Grok models — no API key pasted anywhere.
 - **Subscription web search**: registers a `grok` web-search provider on the
   harness web seam. On Grok-model sessions, `web_search` runs through the
   subscription (server-side `web_search` tool with citations) instead of
-  failing on a missing DeepSeek API key.
+  failing on a missing DeepSeek API key. Inside a live session on another
+  model route the provider steps aside, so a second signed-in subscription
+  keeps its own search without a `WEB_PROVIDER_AMBIGUOUS` failure.
 - **Models settings row**: a **Grok account** row at the bottom of
   Settings → Models mirrors the DeepSeek account row — sign-in state, account
   e-mail, expiry, sign-out.
@@ -135,7 +137,7 @@ Grok 订阅集成插件（DeepSeek Harness Web GUI）：用 xAI 账号 OAuth 登
 - **用量页**（侧边栏入口）：读取 grok-build 同源的账户接口——额度使用百分比、当前计费周期与重置倒计时、预付费余额、按周期用量历史、自动充值规则、生效的订阅档位。
 - **输入框额度环**：Grok 模型会话的输入框旁一个紧凑圆环显示剩余额度；浮窗补充周期倒计时、余额、页面与 SuperGrok 控制台入口。
 - **Grok 模型路由**：登录后 Models 页出现 `grok` 供应商（`grok-4.7` / `grok-4.7-build-fast` / `grok-4.6` / `grok-4.5`，50 万上下文）——推理走订阅令牌（`cli-chat-proxy.grok.com`），后台自动刷新；也保留 API key 模式（`XAI_API_KEY`）。
-- **订阅联网搜索**：向 Harness web 接缝注册 `grok` 搜索 provider。Grok 模型会话的 `web_search` 走订阅（服务端 `web_search` 工具 + 引用），不再因缺少 DeepSeek API key 而失败。
+- **订阅联网搜索**：向 Harness web 接缝注册 `grok` 搜索 provider。Grok 模型会话的 `web_search` 走订阅（服务端 `web_search` 工具 + 引用），不再因缺少 DeepSeek API key 而失败。当前会话在别的模型路由上时，这个 provider 让位，第二个已登录的订阅继续用自己的搜索，不会报 `WEB_PROVIDER_AMBIGUOUS`。
 - **模型设置横栏**：设置 → 模型 底部的「Grok 账号」横栏与 DeepSeek 账号横栏同款——登录状态、账号邮箱、有效期、退出登录。
 
 ## 安装
